@@ -20,9 +20,9 @@ async function main({
         maxOracleDelay,
         timelockAddress,
         name
-    )
+    , { gasLimit: 5_000_000 })
 
-    // console.log(`Oracle contract deployed to ${oracle.target}`)
+    console.log(`Oracle contract deployed to ${oracle.target}`)
 
     await verify(oracle.target, [
         baseToken,

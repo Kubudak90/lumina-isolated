@@ -42,6 +42,8 @@ contract UiDataProviderIsolated {
         InterestRateInfo interestRate;
         ExchangeRateInfo exchangeRate;
         uint256 availableLiquidity;
+        uint256 depositLimit;
+        uint256 borrowLimit;
     }
 
     struct UserData {
@@ -125,7 +127,9 @@ contract UiDataProviderIsolated {
                 chainlinkAssetAddress: oracleChainlink.CHAINLINK_MULTIPLY_ADDRESS(),
                 chainlinkCollateralAddress: oracleChainlink.CHAINLINK_DIVIDE_ADDRESS()
             }),
-            availableLiquidity: totalAssetAmount - totalBorrowAmount
+            availableLiquidity: totalAssetAmount - totalBorrowAmount,
+            depositLimit: pair.depositLimit(),
+            borrowLimit: pair.borrowLimit()
         });
     }
 

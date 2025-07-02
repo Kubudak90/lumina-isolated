@@ -15,5 +15,7 @@ async function main() {
     await verify(dataProvider.target, [], null, {
         verificationDataDir: null, verificationDataPath: null
     })
+
+    console.log(dataProvider.target)
 }
 

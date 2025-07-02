@@ -18,6 +18,8 @@ async function main({
     const HyperlendPairDeployer = await ethers.getContractFactory("HyperlendPairDeployer");
     const hyperlendPairDeployer = HyperlendPairDeployer.attach(hyperlendPairDeployerAddress)
 
+    console.log(await hyperlendPairDeployer.setAmountToSeed('1000000'))
+
     const abiEncoder = new ethers.AbiCoder()
     const configData = abiEncoder.encode(
         [

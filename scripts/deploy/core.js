@@ -11,13 +11,16 @@ async function main() {
 
     // console.log(`-------- core contracts deployment started --------`)
 
-    const Timelock = await ethers.getContractFactory("Timelock");
-    const timelock = await Timelock.deploy(admin.address, 60 * 60 * 24 * 2)
-    console.log(`Timelock deployed to ${timelock.target}`)
+    // const Timelock = await ethers.getContractFactory("Timelock");
+    // const timelock = await Timelock.deploy(admin.address, 60 * 60 * 24 * 2)
+    // console.log(`Timelock deployed to ${timelock.target}`)
 
-    await verify(timelock.target, [admin.address, 60 * 60 * 24 * 2], null, {
-        verificationDataDir: null, verificationDataPath: null
-    })
+    // await verify(timelock.target, [admin.address, 60 * 60 * 24 * 2], null, {
+    //     verificationDataDir: null, verificationDataPath: null
+    // })
+    const timelock = {
+      target: '0xCCcCCcCCC4B6CD09594E7c5bF108695F79313115'
+    }
     
     const HyperlendWhitelist = await ethers.getContractFactory("HyperlendWhitelist");
     const hyperlendWhitelist = await HyperlendWhitelist.deploy();
@@ -28,7 +31,7 @@ async function main() {
         verificationDataDir: null, verificationDataPath: null
     })
 
-    const initialDeployers = [deployer.address, admin.address]
+    const initialDeployers = [deployer.address, timelock.target, admin.address]
     const HyperlendPairRegistry = await ethers.getContractFactory("HyperlendPairRegistry");
     const hyperlendPairRegistry = await HyperlendPairRegistry.deploy(deployer.address, initialDeployers);
     console.log(`HyperlendPairRegistry deployed to ${hyperlendPairRegistry.target}`)
