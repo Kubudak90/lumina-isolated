@@ -54,7 +54,7 @@ module.exports = {
     etherscan: {
         apiKey: {
             hyperEvmTestnet: "empty",
-            hyperEvm: "empty"
+            hyperEvm: process.env.ETHERSCAN
         },
         customChains: [
             {
@@ -69,15 +69,15 @@ module.exports = {
                 network: "hyperEvm",
                 chainId: 999,
                 urls: {
-                    apiURL: "https://hyperliquid.cloud.blockscout.com/api",
-                    browserURL: "https://hyperliquid.cloud.blockscout.com"
+                    apiURL: "https://api.etherscan.io/v2/api?chainid=999",
+                    browserURL: "https://www.hyperscan.com"
                 }
             }
         ]
     },
-    sourcify: {
-        enabled: true,
-        apiUrl: "https://sourcify.parsec.finance",
-        browserUrl: "https://purrsec.com/",
-    }
+    // sourcify: {
+    //     enabled: true,
+    //     apiUrl: "https://sourcify.parsec.finance",
+    //     browserUrl: "https://purrsec.com/",
+    // }
 };

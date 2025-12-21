@@ -47,4 +47,38 @@ async function main({
     }
 }
 
+async function deployLinear({
+    suffix, //name of the rate contract
+    vertexUtilization, //The utilization at which the slope increases
+    zeroUtilizationRate, //interest rate (per second) when utilization is 0%
+    vertexRate, // The interest rate (per second) at vertex utilization
+    fullUtilizationRate, //interest rate (per second) when utilization is 100%
+}) {
+    const InterestRate = await ethers.getContractFactory("LinearInterestRate");
+    const interestRate = await InterestRate.deploy(
+        suffix,
+        vertexUtilization,
+        zeroUtilizationRate,
+        vertexRate,
+        fullUtilizationRate
+    )
+
+    await verify(interestRate.target, [
+        suffix,
+        vertexUtilization,
+        zeroUtilizationRate,
+        vertexRate,
+        fullUtilizationRate
+    ], null, {
+        verificationDataDir: null, verificationDataPath: null
+    })
+
+    // console.log(`LinearInterestRate contract deployed to ${interestRate.target}`)
+
+    return {
+        interestRate: interestRate
+    }
+}
+
 module.exports.main = main
+module.exports.deployLinear = deployLinear
