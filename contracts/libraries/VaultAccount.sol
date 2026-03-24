@@ -11,37 +11,36 @@ struct VaultAccount {
 /// @notice Provides a library for use with the VaultAccount struct, provides convenient math implementations
 /// @dev Uses uint128 to save on storage
 library VaultAccountingLibrary {
-    /// @notice Calculates the shares value in relationship to `amount` and `total`
-    /// @dev Given an amount, return the appropriate number of shares
+    uint256 private constant VIRTUAL_SHARES = 1e3;
+    uint256 private constant VIRTUAL_AMOUNT = 1e3;
+
+    /// @notice Converts a given amount of assets to shares, with optional rounding up
     function toShares(
         VaultAccount memory total,
         uint256 amount,
         bool roundUp
     ) internal pure returns (uint256 shares) {
-        if (total.amount == 0) {
-            shares = amount;
-        } else {
-            shares = (amount * total.shares) / total.amount;
-            if (roundUp && (shares * total.amount) / total.shares < amount) {
-                shares = shares + 1;
-            }
+        uint256 totalAmount = uint256(total.amount) + VIRTUAL_AMOUNT;
+        uint256 totalShares = uint256(total.shares) + VIRTUAL_SHARES;
+
+        shares = (amount * totalShares) / totalAmount;
+        if (roundUp && (shares * totalAmount) / totalShares < amount) {
+            shares += 1;
         }
     }
 
-    /// @notice Calculates the amount value in relationship to `shares` and `total`
-    /// @dev Given a number of shares, returns the appropriate amount
+    /// @notice Converts a given number of shares to an amount of assets, with optional rounding up
     function toAmount(
         VaultAccount memory total,
         uint256 shares,
         bool roundUp
     ) internal pure returns (uint256 amount) {
-        if (total.shares == 0) {
-            amount = shares;
-        } else {
-            amount = (shares * total.amount) / total.shares;
-            if (roundUp && (amount * total.shares) / total.amount < shares) {
-                amount = amount + 1;
-            }
+        uint256 totalAmount = uint256(total.amount) + VIRTUAL_AMOUNT;
+        uint256 totalShares = uint256(total.shares) + VIRTUAL_SHARES;
+
+        amount = (shares * totalAmount) / totalShares;
+        if (roundUp && (amount * totalShares) / totalAmount < shares) {
+            amount += 1;
         }
     }
 }

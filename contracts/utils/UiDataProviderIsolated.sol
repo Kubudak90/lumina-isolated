@@ -3,9 +3,9 @@ pragma solidity ^0.8.19;
 
 import { ERC20 } from '@openzeppelin/contracts/token/ERC20/ERC20.sol';
 import { IERC20Metadata } from '@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol';
-import { HyperlendPair } from '../HyperlendPair.sol';
+import { LightlendPair } from '../LightlendPair.sol';
 import { OracleChainlink } from '../oracles/OracleChainlink.sol';
-import { HyperlendPairRegistry } from '../HyperlendPairRegistry.sol';
+import { LightlendPairRegistry } from '../LightlendPairRegistry.sol';
 
 interface AggregatorInterface {
     function latestAnswer() external view returns (int256);
@@ -79,7 +79,7 @@ contract UiDataProviderIsolated {
     uint256 public constant UTIL_PREC = 1e5;
 
     function getPairData(address _pair) external view returns (PairData memory pairData) {
-        HyperlendPair pair = HyperlendPair(_pair);
+        LightlendPair pair = LightlendPair(_pair);
 
         (uint128 totalAssetAmount, ) = pair.totalAsset();
         (uint128 totalBorrowAmount, ) = pair.totalBorrow();
@@ -134,7 +134,7 @@ contract UiDataProviderIsolated {
     }
 
     function getUserData(address _user, address _pair) external view returns (UserData memory) {
-        HyperlendPair pair = HyperlendPair(_pair);
+        LightlendPair pair = LightlendPair(_pair);
 
         (
             uint256 _userAssetShares,
@@ -156,11 +156,11 @@ contract UiDataProviderIsolated {
     }
 
     function getUserPairs(address _user, address _registry) external view returns (UserPosition[] memory){
-        address[] memory pairs = HyperlendPairRegistry(_registry).getAllPairAddresses();
+        address[] memory pairs = LightlendPairRegistry(_registry).getAllPairAddresses();
 
         UserPosition[] memory userPositions = new UserPosition[](pairs.length);
         for (uint256 i = 0; i < pairs.length; i++){
-            HyperlendPair pair = HyperlendPair(pairs[i]);
+            LightlendPair pair = LightlendPair(pairs[i]);
             (
                 uint256 userAssetShares,
                 uint256 userBorrowShares,

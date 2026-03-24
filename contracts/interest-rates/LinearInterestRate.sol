@@ -90,7 +90,12 @@ contract LinearInterestRate is IRateCalculatorV2 {
                 (UTIL_PREC - VERTEX_UTILIZATION);
         }
 
-        _newRatePerSec = uint64(rate);
+        _newRatePerSec = _toUint64(rate);
         _newFullUtilizationInterest = uint64(FULL_UTIL_RATE);
+    }
+
+    function _toUint64(uint256 value) internal pure returns (uint64) {
+        require(value <= type(uint64).max, "uint64 overflow");
+        return uint64(value);
     }
 }

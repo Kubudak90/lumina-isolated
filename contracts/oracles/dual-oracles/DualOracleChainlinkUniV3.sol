@@ -22,6 +22,7 @@ contract DualOracleChainlinkUniV3 is Timelock2Step {
     uint256 public maxOracleDelay;
 
     // Uni V3 Data
+    IStaticOracle public immutable UNI_V3_STATIC_ORACLE;
     address public immutable UNI_V3_PAIR_ADDRESS;
     uint32 public immutable TWAP_DURATION;
 
@@ -45,9 +46,13 @@ contract DualOracleChainlinkUniV3 is Timelock2Step {
         address _uniV3PairAddress,
         uint32 _twapDuration,
         address _timelockAddress,
-        string memory _name
+        string memory _name,
+        address _uniV3StaticOracle
     ) Timelock2Step() {
         _setTimelock({_newTimelock: _timelockAddress});
+
+        require(_uniV3StaticOracle != address(0), "zero oracle address");
+        UNI_V3_STATIC_ORACLE = IStaticOracle(_uniV3StaticOracle);
 
         BASE_TOKEN = _baseToken;
         QUOTE_TOKEN = _quoteToken;
@@ -59,13 +64,10 @@ contract DualOracleChainlinkUniV3 is Timelock2Step {
         uint8 _divideDecimals = _chainlinkDivideAddress != address(0)
             ? AggregatorV3Interface(_chainlinkDivideAddress).decimals()
             : 0;
-        CHAINLINK_NORMALIZATION =
-            10 **
-                (18 +
-                    _multiplyDecimals -
-                    _divideDecimals +
-                    IERC20Metadata(_baseToken).decimals() -
-                    IERC20Metadata(_quoteToken).decimals());
+
+        int256 _exponent = int256(uint256(18 + _multiplyDecimals)) - int256(uint256(_divideDecimals)) + int256(uint256(IERC20Metadata(_baseToken).decimals())) - int256(uint256(IERC20Metadata(_quoteToken).decimals()));
+        require(_exponent >= 0, "negative normalization exponent");
+        CHAINLINK_NORMALIZATION = 10 ** uint256(_exponent);
 
         maxOracleDelay = _maxOracleDelay;
 
@@ -130,7 +132,7 @@ contract DualOracleChainlinkUniV3 is Timelock2Step {
     {
         address[] memory _pools = new address[](1);
         _pools[0] = UNI_V3_PAIR_ADDRESS;
-        uint256 _price1 = IStaticOracle(0xB210CE856631EeEB767eFa666EC7C1C57738d438)
+        uint256 _price1 = UNI_V3_STATIC_ORACLE
             .quoteSpecificPoolsWithTimePeriod(
                 ORACLE_PRECISION,
                 BASE_TOKEN,

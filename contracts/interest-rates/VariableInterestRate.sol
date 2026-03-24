@@ -57,6 +57,15 @@ contract VariableInterestRate is IRateCalculatorV2 {
         uint256 _maxFullUtilizationRate,
         uint256 _rateHalfLife
     ) {
+        // Validate constructor parameters
+        require(_minUtil <= _maxUtil, "min > max target util");
+        require(_maxUtil <= UTIL_PREC, "target util > 100%");
+        require(_vertexUtilization > 0, "vertex util is 0");
+        require(_vertexUtilization <= UTIL_PREC, "vertex util > 100%");
+        require(_minFullUtilizationRate <= _maxFullUtilizationRate, "min > max full util rate");
+        require(_rateHalfLife > 0, "rate half life is 0");
+        require(_zeroUtilizationRate <= _vertexRatePercentOfDelta, "zero > vertex rate");
+
         suffix = _suffix;
         MIN_TARGET_UTIL = _minUtil;
         MAX_TARGET_UTIL = _maxUtil;
