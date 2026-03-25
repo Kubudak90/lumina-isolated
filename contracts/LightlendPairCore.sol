@@ -110,6 +110,16 @@ abstract contract LightlendPairCore is
     // Bad debt cap: max 5% of total assets can be written off per liquidation
     uint256 public constant MAX_BAD_DEBT_BPS = 500;
 
+    /// @notice Maximum allowed age for exchange rate before borrowing is disabled
+    uint256 public constant MAX_EXCHANGE_RATE_AGE = 1 hours;
+
+    /// @notice Cumulative bad debt written off during the current epoch
+    uint128 public cumulativeBadDebtWriteOff;
+    /// @notice Timestamp when the current bad debt epoch started
+    uint256 public badDebtEpochStart;
+    /// @notice Duration of each bad debt epoch (resets cumulative tracker)
+    uint256 public constant BAD_DEBT_EPOCH_DURATION = 1 days;
+
     /// @notice Emitted when bad debt is written off during liquidation
     event BadDebtWriteOff(uint256 amount, uint256 remainingTotalAssets);
 
@@ -144,6 +154,13 @@ abstract contract LightlendPairCore is
                 _configData,
                 (address, address, address, uint32, address, uint64, uint256, uint256, uint256)
             );
+
+            require(_asset != address(0), "zero asset");
+            require(_collateral != address(0), "zero collateral");
+            require(_oracle != address(0), "zero oracle");
+            require(_rateContract != address(0), "zero rate contract");
+            require(_fullUtilizationRate > 0, "zero utilization rate");
+            require(_maxLTV > 0 && _maxLTV <= LTV_PRECISION, "invalid LTV");
 
             // Pair Settings
             assetContract = IERC20(_asset);
@@ -199,6 +216,7 @@ abstract contract LightlendPairCore is
         VaultAccount memory _totalAsset,
         VaultAccount memory _totalBorrow
     ) internal pure returns (uint256) {
+        if (_totalAsset.amount < _totalBorrow.amount) return 0;
         return _totalAsset.amount - _totalBorrow.amount;
     }
 
@@ -432,6 +450,9 @@ abstract contract LightlendPairCore is
         // Emit overflow event if interest accrual would overflow — skip state update
         if (_results.isOverflow) {
             emit InterestAccrualOverflow(_results.interestEarned, _results.totalBorrow.amount);
+            _currentRateInfo.lastTimestamp = uint64(block.timestamp);
+            _currentRateInfo.lastBlock = uint32(block.number);
+            currentRateInfo = _currentRateInfo;
             return (_isInterestUpdated, _interestEarned, _feesAmount, _feesShare, _currentRateInfo);
         }
 
@@ -503,10 +524,11 @@ abstract contract LightlendPairCore is
         // Pull from storage to save gas and set default return values
         ExchangeRateInfo memory _exchangeRateInfo = exchangeRateInfo;
 
+        bool _oneOracleBad;
+
         // Short circuit if already updated this block
         if (_exchangeRateInfo.lastTimestamp != block.timestamp) {
             // Get the latest exchange rate from the dual oracle
-            bool _oneOracleBad;
             (_oneOracleBad, _lowExchangeRate, _highExchangeRate) = IDualOracle(
                 _exchangeRateInfo.oracle
             ).getPrices();
@@ -534,8 +556,10 @@ abstract contract LightlendPairCore is
         uint256 _deviation = (DEVIATION_PRECISION *
             (_exchangeRateInfo.highExchangeRate - _exchangeRateInfo.lowExchangeRate)) /
             _exchangeRateInfo.highExchangeRate;
-        if (_deviation <= _exchangeRateInfo.maxOracleDeviation) {
-            _isBorrowAllowed = true;
+        if (_deviation <= _exchangeRateInfo.maxOracleDeviation && !_oneOracleBad) {
+            if (block.timestamp - _exchangeRateInfo.lastTimestamp <= MAX_EXCHANGE_RATE_AGE) {
+                _isBorrowAllowed = true;
+            }
         }
     }
 
@@ -1105,13 +1129,32 @@ abstract contract LightlendPairCore is
                     // Write off bad debt
                     _amountToAdjust = (_totalBorrow.toAmount(_sharesToAdjust, false)).toUint128();
 
-                    // Cap the write-off to MAX_BAD_DEBT_BPS of total assets
+                    // Reset epoch if expired
+                    if (block.timestamp >= badDebtEpochStart + BAD_DEBT_EPOCH_DURATION) {
+                        badDebtEpochStart = block.timestamp;
+                        cumulativeBadDebtWriteOff = 0;
+                    }
+
+                    // Cap per-liquidation
                     uint256 _maxWriteOff = (totalAsset.amount * MAX_BAD_DEBT_BPS) / 10000;
                     if (_amountToAdjust > _maxWriteOff) {
                         _amountToAdjust = uint128(_maxWriteOff);
-                        // Recompute shares to match the capped amount
                         _sharesToAdjust = (_totalBorrow.toShares(_amountToAdjust, false)).toUint128();
                     }
+
+                    // Enforce epoch-level cumulative cap
+                    uint256 _remainingEpochBudget = _maxWriteOff > cumulativeBadDebtWriteOff
+                        ? _maxWriteOff - cumulativeBadDebtWriteOff
+                        : 0;
+                    if (_amountToAdjust > _remainingEpochBudget) {
+                        _amountToAdjust = uint128(_remainingEpochBudget);
+                        _sharesToAdjust = _amountToAdjust > 0
+                            ? (_totalBorrow.toShares(_amountToAdjust, false)).toUint128()
+                            : 0;
+                    }
+
+                    // Update cumulative tracker
+                    cumulativeBadDebtWriteOff += uint128(_amountToAdjust);
 
                     if (_amountToAdjust > 0) {
                         // Note: Ensure this memory struct will be passed to _repayAsset for write to state
@@ -1234,6 +1277,7 @@ abstract contract LightlendPairCore is
             address(this),
             block.timestamp
         );
+        _assetContract.safeApprove(_swapperAddress, 0);
         uint256 _finalCollateralBalance = _collateralContract.balanceOf(address(this));
 
         // Note: VIOLATES CHECKS-EFFECTS-INTERACTION pattern, make sure function is NONREENTRANT
@@ -1319,6 +1363,7 @@ abstract contract LightlendPairCore is
             address(this),
             block.timestamp
         );
+        _collateralContract.safeApprove(_swapperAddress, 0);
         uint256 _finalAssetBalance = _assetContract.balanceOf(address(this));
 
         // Note: VIOLATES CHECKS-EFFECTS-INTERACTION pattern, make sure function is NONREENTRANT
@@ -1330,6 +1375,13 @@ abstract contract LightlendPairCore is
 
         VaultAccount memory _totalBorrow = totalBorrow;
         uint256 _sharesToRepay = _totalBorrow.toShares(_amountAssetOut, false);
+
+        // Handle "repay all" case to avoid dust
+        uint256 _userShares = userBorrowShares[msg.sender];
+        if (_sharesToRepay >= _userShares) {
+            _sharesToRepay = _userShares;
+            _amountAssetOut = _totalBorrow.toAmount(_sharesToRepay, true);
+        }
 
         // Effects: write to state
         // Note: setting _payer to address(this) means no actual transfer will occur.  Contract already has funds

@@ -317,6 +317,8 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     function setOracle(address _newOracle, uint32 _newMaxOracleDeviation) external {
         _requireTimelock();
         if (isOracleSetterRevoked) revert SetterRevoked();
+        require(_newOracle != address(0), "zero oracle");
+        require(_newMaxOracleDeviation > 0 && _newMaxOracleDeviation < uint32(DEVIATION_PRECISION), "invalid deviation");
         ExchangeRateInfo memory _exchangeRateInfo = exchangeRateInfo;
         emit SetOracleInfo(
             _exchangeRateInfo.oracle,
@@ -423,6 +425,8 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
         if (isLiquidationFeeSetterRevoked) revert SetterRevoked();
         require(_newCleanLiquidationFee > 0, "clean fee must be > 0");
         require(_newDirtyLiquidationFee > 0, "dirty fee must be > 0");
+        require(_newCleanLiquidationFee <= 50_000, "clean fee too high");
+        require(_newDirtyLiquidationFee <= 50_000, "dirty fee too high");
         require(_newProtocolLiquidationFee < LIQ_PRECISION, "protocol fee >= 100%");
         require(
             _newCleanLiquidationFee + _newProtocolLiquidationFee < LIQ_PRECISION,

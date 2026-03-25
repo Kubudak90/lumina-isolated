@@ -45,6 +45,7 @@ abstract contract LightlendPairAccessControl is
             address _comptrollerAddress,
             address _timelockAddress
         ) = abi.decode(_immutables, (address, address, address));
+        require(_timelockAddress != address(0), "zero timelock");
         _setTimelock(_timelockAddress);
         _transferOwnership(_comptrollerAddress);
 
