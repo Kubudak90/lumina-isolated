@@ -3,8 +3,8 @@ const { ethers } = require("hardhat");
 const { verify } = require("../utils/verify")
 
 async function main({
-    hyperlendPairRegistry,
-    hyperlendPairDeployerAddress,
+    lightlendPairRegistry,
+    lightlendPairDeployerAddress,
     assetTokenAddress,
     collateralTokenAddress,
     interestRateAddress,
@@ -15,10 +15,10 @@ async function main({
     cleanLiquidationFee = "10000", //10%
     protocolLiquidationFee = "1000" //10% of the liquidator's fee
 }) {
-    const HyperlendPairDeployer = await ethers.getContractFactory("HyperlendPairDeployer");
-    const hyperlendPairDeployer = HyperlendPairDeployer.attach(hyperlendPairDeployerAddress)
+    const LightlendPairDeployer = await ethers.getContractFactory("LightlendPairDeployer");
+    const lightlendPairDeployer = LightlendPairDeployer.attach(lightlendPairDeployerAddress)
 
-    console.log(await hyperlendPairDeployer.setAmountToSeed('1000000'))
+    console.log(await lightlendPairDeployer.setAmountToSeed('1000000'))
 
     const abiEncoder = new ethers.AbiCoder()
     const configData = abiEncoder.encode(
@@ -41,11 +41,11 @@ async function main({
             protocolLiquidationFee
         ]
     );
-    await hyperlendPairDeployer.deploy(configData)
+    await lightlendPairDeployer.deploy(configData)
     // console.log(`Market with asset ${assetTokenAddress} and collateral ${collateralTokenAddress} deployed successfully!`)
 
-    const PairRegistry = await ethers.getContractFactory("HyperlendPairRegistry")
-    const pairRegistry = PairRegistry.attach(hyperlendPairRegistry)
+    const PairRegistry = await ethers.getContractFactory("LightlendPairRegistry")
+    const pairRegistry = PairRegistry.attach(lightlendPairRegistry)
 
     let newPairIndex = await pairRegistry.deployedPairsLength()
     let newPairAddress = await pairRegistry.deployedPairsArray(Number(newPairIndex)-1)

@@ -13,14 +13,14 @@ module.exports = {
             },
             chainId: 1337,
         },
-        hyperEvmTestnet: {
+        lighterEvmTestnet: {
             accounts: {
                 mnemonic,
             },
             chainId: 998,
             url: 'https://rpc.hyperliquid-testnet.xyz/evm',
         },
-        hyperEvm: {
+        lighterEvm: {
             accounts: {
                 mnemonic,
             },
@@ -53,20 +53,20 @@ module.exports = {
     },
     etherscan: {
         apiKey: {
-            hyperEvmTestnet: "empty",
-            hyperEvm: process.env.ETHERSCAN
+            lighterEvmTestnet: "empty",
+            lighterEvm: process.env.ETHERSCAN
         },
         customChains: [
             {
-                network: "hyperEvmTestnet",
+                network: "lighterEvmTestnet",
                 chainId: 998,
                 urls: {
-                    apiURL: "https://explorer.hyperlend.finance/api",
-                    browserURL: "https://explorer.hyperlend.finance"
+                    apiURL: "https://explorer.lightlend.finance/api",
+                    browserURL: "https://explorer.lightlend.finance"
                 }
             },
             {
-                network: "hyperEvm",
+                network: "lighterEvm",
                 chainId: 999,
                 urls: {
                     apiURL: "https://api.etherscan.io/v2/api?chainid=999",

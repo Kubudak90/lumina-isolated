@@ -22,21 +22,21 @@ async function main() {
       target: '0xCCcCCcCCC4B6CD09594E7c5bF108695F79313115'
     }
     
-    const HyperlendWhitelist = await ethers.getContractFactory("HyperlendWhitelist");
-    const hyperlendWhitelist = await HyperlendWhitelist.deploy();
-    await hyperlendWhitelist.setHyperlendDeployerWhitelist([deployer.address], [true])
-    console.log(`HyperlendWhitelist deployed to ${hyperlendWhitelist.target}`)
+    const LightlendWhitelist = await ethers.getContractFactory("LightlendWhitelist");
+    const lightlendWhitelist = await LightlendWhitelist.deploy();
+    await lightlendWhitelist.setLightlendDeployerWhitelist([deployer.address], [true])
+    console.log(`LightlendWhitelist deployed to ${lightlendWhitelist.target}`)
 
-    await verify(hyperlendWhitelist.target, [deployer.address], null, {
+    await verify(lightlendWhitelist.target, [deployer.address], null, {
         verificationDataDir: null, verificationDataPath: null
     })
 
     const initialDeployers = [deployer.address, timelock.target, admin.address]
-    const HyperlendPairRegistry = await ethers.getContractFactory("HyperlendPairRegistry");
-    const hyperlendPairRegistry = await HyperlendPairRegistry.deploy(deployer.address, initialDeployers);
-    console.log(`HyperlendPairRegistry deployed to ${hyperlendPairRegistry.target}`)
+    const LightlendPairRegistry = await ethers.getContractFactory("LightlendPairRegistry");
+    const lightlendPairRegistry = await LightlendPairRegistry.deploy(deployer.address, initialDeployers);
+    console.log(`LightlendPairRegistry deployed to ${lightlendPairRegistry.target}`)
 
-    await verify(hyperlendPairRegistry.target, [deployer.address, initialDeployers], null, {
+    await verify(lightlendPairRegistry.target, [deployer.address, initialDeployers], null, {
         verificationDataDir: null, verificationDataPath: null
     })
 
@@ -45,39 +45,39 @@ async function main() {
         comptroller: admin.address,
         timelock: timelock.target,
     }
-    const HyperlendPairDeployer = await ethers.getContractFactory("HyperlendPairDeployer");
-    const hyperlendPairDeployerParams = {
+    const LightlendPairDeployer = await ethers.getContractFactory("LightlendPairDeployer");
+    const lightlendPairDeployerParams = {
         circuitBreaker: constructorParams.circuitBreaker,
         comptroller: constructorParams.timelock,
         timelock: constructorParams.timelock,
-        hyperlendWhitelist: hyperlendWhitelist.target,
-        hyperlendPairRegistry: hyperlendPairRegistry.target
+        lightlendWhitelist: lightlendWhitelist.target,
+        lightlendPairRegistry: lightlendPairRegistry.target
     }
-    const hyperlendPairDeployer = await HyperlendPairDeployer.deploy(hyperlendPairDeployerParams);
-    console.log(`HyperlendPairDeployer deployed to ${hyperlendPairDeployer.target}`)
+    const lightlendPairDeployer = await LightlendPairDeployer.deploy(lightlendPairDeployerParams);
+    console.log(`LightlendPairDeployer deployed to ${lightlendPairDeployer.target}`)
 
-    await verify(hyperlendPairDeployer.target, [hyperlendPairDeployerParams], null, {
+    await verify(lightlendPairDeployer.target, [lightlendPairDeployerParams], null, {
         verificationDataDir: null, verificationDataPath: null
     })
 
     //set deployer contract as deployer in pairRegistry
-    await hyperlendPairRegistry.setDeployers([hyperlendPairDeployer.target], [true])
+    await lightlendPairRegistry.setDeployers([lightlendPairDeployer.target], [true])
 
     //set pair creation code
-    const pairArtifacts = JSON.parse(fs.readFileSync(path.join(__dirname + "../../../artifacts/contracts/HyperlendPair.sol/HyperlendPair.json")))
-    await hyperlendPairDeployer.setCreationCode(pairArtifacts.bytecode)
-    console.log(`HyperlendPair creation code set`)
+    const pairArtifacts = JSON.parse(fs.readFileSync(path.join(__dirname + "../../../artifacts/contracts/LightlendPair.sol/LightlendPair.json")))
+    await lightlendPairDeployer.setCreationCode(pairArtifacts.bytecode)
+    console.log(`LightlendPair creation code set`)
 
     const deploymentData = {
-        hyperlendWhitelist: hyperlendWhitelist.target,
-        hyperlendPairRegistry: hyperlendPairRegistry.target,
-        hyperlendPairDeployer: hyperlendPairDeployer.target,
+        lightlendWhitelist: lightlendWhitelist.target,
+        lightlendPairRegistry: lightlendPairRegistry.target,
+        lightlendPairDeployer: lightlendPairDeployer.target,
         params: {
-            hyperlendPairRegistry: {
+            lightlendPairRegistry: {
                 owner: deployer.address,
                 initialDeployers: initialDeployers
             },
-            hyperlendPairDeployer: hyperlendPairDeployerParams
+            lightlendPairDeployer: lightlendPairDeployerParams
         },
         timelock: timelock.target
     }
@@ -86,9 +86,9 @@ async function main() {
     return {
         deployer: deployer, //admin: admin, borrower: borrower, lender: lender,
         timelock: timelock,
-        hyperlendWhitelist: hyperlendWhitelist,
-        hyperlendPairRegistry: hyperlendPairRegistry,
-        hyperlendPairDeployer: hyperlendPairDeployer,
+        lightlendWhitelist: lightlendWhitelist,
+        lightlendPairRegistry: lightlendPairRegistry,
+        lightlendPairDeployer: lightlendPairDeployer,
         extra: deploymentData
     }
 }

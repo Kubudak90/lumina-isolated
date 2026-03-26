@@ -30,7 +30,7 @@ async function main(){
     // console.log(await oracle.getPrices())
     // console.log(await oracle.decimals())
 
-    // const pair = await ethers.getContractAt("HyperlendPair", "0xbb727Bce50C12c9472Bf5d6F0e76388455ec62d5")
+    // const pair = await ethers.getContractAt("LightlendPair", "0xbb727Bce50C12c9472Bf5d6F0e76388455ec62d5")
     // // console.log(await pair.exchangeRateInfo())
     // const oracle = await ethers.getContractAt("OracleChainlink", "0x9A414698155452234ce8e3990BB8DBEdD49ef9Cd")
     // console.log(await oracle.getPrices())
@@ -77,8 +77,8 @@ async function main(){
     // console.log(interestRate)
 
     let pairConfig = {
-        hyperlendPairRegistry: "0xf55AF86c9EC3a7d5fa6367c00a120E6B262f718d",
-        hyperlendPairDeployerAddress: "0xD5B33d3c6e750A51fd4E90dbf4AFa2586E33d02c",
+        lightlendPairRegistry: "0xf55AF86c9EC3a7d5fa6367c00a120E6B262f718d",
+        lightlendPairDeployerAddress: "0xD5B33d3c6e750A51fd4E90dbf4AFa2586E33d02c",
         assetTokenAddress: "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb", //borrow WETH
         collateralTokenAddress: "0x1359b05241cA5076c9F59605214f4F84114c0dE8", //supply MBTC as collateral
         interestRateAddress: '0x02CA3a21136715A7a06B45DF24383B18A56aF931',

@@ -38,7 +38,7 @@ describe("BaseTest", function () {
         let deploymentInstanceOracle = await setup.deployOracle(oracleConfig) //oracle returns amount of collateral to buy 1e18 of asset
 
         return { 
-            //available contracts: timelock, hyperlendWhitelist, hyperlendPairRegistry, hyperlendPairDeployer; signers: depoyer, admin, borrower, lender
+            //available contracts: timelock, lightlendWhitelist, lightlendPairRegistry, lightlendPairDeployer; signers: depoyer, admin, borrower, lender
             ...deploymentInstancesCore, 
             //available contracts: interestRate
             ...deploymentInstanceInterestRate,
@@ -51,8 +51,8 @@ describe("BaseTest", function () {
 
     async function deployPair(fixture){
         let pairConfig = {
-            hyperlendPairRegistry: fixture.hyperlendPairRegistry.target,
-            hyperlendPairDeployerAddress: fixture.hyperlendPairDeployer.target,
+            lightlendPairRegistry: fixture.lightlendPairRegistry.target,
+            lightlendPairDeployerAddress: fixture.lightlendPairDeployer.target,
             assetTokenAddress: fixture.mockTokens.WETH.target, //borrow WETH
             collateralTokenAddress: fixture.mockTokens.USDC.target, //supply USDC as collateral
             interestRateAddress: fixture.interestRate.target,
@@ -64,7 +64,7 @@ describe("BaseTest", function () {
             protocolLiquidationFee: "1000" //10% of the liquidator's fee
         }
         let pairAddress = await setup.deployPair(pairConfig)
-        let pair = (await ethers.getContractFactory("HyperlendPair")).attach(pairAddress)
+        let pair = (await ethers.getContractFactory("LightlendPair")).attach(pairAddress)
 
         return { pair }
     }
@@ -73,7 +73,7 @@ describe("BaseTest", function () {
         let data = await loadFixture(deployCore)
         let { pair } = await deployPair(data)
 
-        expect(await pair.name()).to.equal("Hyperlend Interest Bearing WETH (USDC)")
+        expect(await pair.name()).to.equal("Lightlend Interest Bearing WETH (USDC)")
         expect(await pair.asset()).to.equal(data.mockTokens.WETH.target)
     });
 

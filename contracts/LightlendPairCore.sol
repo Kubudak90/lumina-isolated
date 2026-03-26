@@ -1328,9 +1328,9 @@ abstract contract LightlendPairCore is
         // Accrue interest if necessary
         _addInterest();
 
-        // Update exchange rate and check if borrow is allowed, revert if not
-        (bool _isBorrowAllowed, , ) = _updateExchangeRate();
-        if (!_isBorrowAllowed) revert ExceedsMaxOracleDeviation();
+        // Update exchange rate but allow repayment even during oracle stress
+        // Repaying with collateral reduces risk, so it should not be blocked by oracle deviation
+        _updateExchangeRate();
 
         IERC20 _assetContract = assetContract;
         IERC20 _collateralContract = collateralContract;
