@@ -287,6 +287,8 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     // Functions: Configuration
     // ============================================================================================
 
+    bool public deployerSwapperRevoked;
+
     bool public isOracleSetterRevoked;
 
     /// @notice The ```RevokeOracleSetter``` event is emitted when the oracle setter is revoked
@@ -381,6 +383,7 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     function setRateContract(address _newRateContract) external {
         _requireTimelock();
         if (isRateContractSetterRevoked) revert SetterRevoked();
+        require(_newRateContract != address(0), "zero rate contract");
         emit SetRateContract(address(rateContract), _newRateContract);
         rateContract = IRateCalculatorV2(_newRateContract);
     }
@@ -514,9 +517,15 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     /// @notice The ```setSwapper``` function is called to black or whitelist a given swapper address
     /// @param _swapper The swapper address
     /// @param _approval The approval
-    function setSwapper(address _swapper, bool _approval) external onlyOwner {
+    function setSwapper(address _swapper, bool _approval) external {
+        require(msg.sender == owner() || (msg.sender == DEPLOYER_ADDRESS && !deployerSwapperRevoked), "unauthorized");
         swappers[_swapper] = _approval;
         emit SetSwapper(_swapper, _approval);
+    }
+
+    /// @notice The ```revokeDeployerSwapperAccess``` function revokes the deployer's ability to set swappers
+    function revokeDeployerSwapperAccess() external onlyOwner {
+        deployerSwapperRevoked = true;
     }
 
     // ============================================================================================

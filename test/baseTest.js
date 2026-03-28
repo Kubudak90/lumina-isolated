@@ -50,6 +50,9 @@ describe("BaseTest", function () {
     }
 
     async function deployPair(fixture){
+        // Mint seed tokens to the deployer so it can seed the new pair
+        await fixture.mockTokens.WETH.mint(fixture.lightlendPairDeployer.target, ethers.parseUnits("1", 18))
+
         let pairConfig = {
             lightlendPairRegistry: fixture.lightlendPairRegistry.target,
             lightlendPairDeployerAddress: fixture.lightlendPairDeployer.target,

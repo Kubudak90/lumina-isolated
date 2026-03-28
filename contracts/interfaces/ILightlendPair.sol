@@ -66,7 +66,8 @@ interface ILightlendPair {
     function exchangeRateInfo() external view returns (
         address oracle,
         uint32 maxOracleDeviation,
-        uint184 lastTimestampExchRate,
+        bool oneOracleBad,
+        uint176 lastTimestampExchRate,
         uint256 lowExchangeRate,
         uint256 highExchangeRate
     );

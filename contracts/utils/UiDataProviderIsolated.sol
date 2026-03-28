@@ -22,7 +22,7 @@ contract UiDataProviderIsolated {
     struct ExchangeRateInfo {
         address oracle;
         uint32 maxOracleDeviation;
-        uint184 lastTimestamp;
+        uint176 lastTimestamp;
         uint256 lowExchangeRate;
         uint256 highExchangeRate;
         address chainlinkAssetAddress;
@@ -93,12 +93,27 @@ contract UiDataProviderIsolated {
         (
             address oracle,
             uint32 maxOracleDeviation,
-            uint184 lastTimestampExchRate,
+            ,
+            uint176 lastTimestampExchRate,
             uint256 lowExchangeRate,
             uint256 highExchangeRate
         ) = pair.exchangeRateInfo();
 
         OracleChainlink oracleChainlink = OracleChainlink(oracle);
+
+        address _chainlinkAssetAddress;
+        try oracleChainlink.CHAINLINK_MULTIPLY_ADDRESS() returns (address _addr) {
+            _chainlinkAssetAddress = _addr;
+        } catch {
+            _chainlinkAssetAddress = address(0);
+        }
+
+        address _chainlinkCollateralAddress;
+        try oracleChainlink.CHAINLINK_DIVIDE_ADDRESS() returns (address _addr) {
+            _chainlinkCollateralAddress = _addr;
+        } catch {
+            _chainlinkCollateralAddress = address(0);
+        }
 
         return PairData({
             pair: _pair,
@@ -124,10 +139,10 @@ contract UiDataProviderIsolated {
                 lastTimestamp: lastTimestampExchRate,
                 lowExchangeRate: lowExchangeRate,
                 highExchangeRate: highExchangeRate,
-                chainlinkAssetAddress: oracleChainlink.CHAINLINK_MULTIPLY_ADDRESS(),
-                chainlinkCollateralAddress: oracleChainlink.CHAINLINK_DIVIDE_ADDRESS()
+                chainlinkAssetAddress: _chainlinkAssetAddress,
+                chainlinkCollateralAddress: _chainlinkCollateralAddress
             }),
-            availableLiquidity: totalAssetAmount - totalBorrowAmount,
+            availableLiquidity: totalAssetAmount > totalBorrowAmount ? totalAssetAmount - totalBorrowAmount : 0,
             depositLimit: pair.depositLimit(),
             borrowLimit: pair.borrowLimit()
         });
@@ -170,7 +185,7 @@ contract UiDataProviderIsolated {
                 (,uint256 feeToProtocolRate,,uint64 ratePerSec,) = pair.currentRateInfo();
                 (uint128 borrowAmount,) = pair.totalBorrow();
                 (uint128 assetAmount,) = pair.totalAsset();
-                (address oracle,,,,) = pair.exchangeRateInfo();
+                (address oracle,,,,,) = pair.exchangeRateInfo();
 
                 IERC20Metadata asset = IERC20Metadata(address(pair.asset()));
                 IERC20Metadata collateral = IERC20Metadata(address(pair.collateralContract()));
@@ -189,12 +204,34 @@ contract UiDataProviderIsolated {
                     ratePerSec: ratePerSec,
                     feeToProtocolRate: feeToProtocolRate,
                     utilization: assetAmount == 0 ? 0 : (UTIL_PREC * borrowAmount) / assetAmount,
-                    assetPrice: AggregatorInterface(OracleChainlink(oracle).CHAINLINK_MULTIPLY_ADDRESS()).latestAnswer(),
-                    collateralPrice: AggregatorInterface(OracleChainlink(oracle).CHAINLINK_DIVIDE_ADDRESS()).latestAnswer()
+                    assetPrice: _safeLatestAnswer(oracle, true),
+                    collateralPrice: _safeLatestAnswer(oracle, false)
                 });
             }
         }
 
         return userPositions;
+    }
+
+    function _safeLatestAnswer(address oracle, bool isMultiply) internal view returns (int256) {
+        try OracleChainlink(oracle).CHAINLINK_MULTIPLY_ADDRESS() returns (address _addr) {
+            if (isMultiply && _addr != address(0)) {
+                try AggregatorInterface(_addr).latestAnswer() returns (int256 _price) {
+                    return _price;
+                } catch { return 0; }
+            }
+        } catch { /* oracle doesn't support multiply */ }
+
+        if (!isMultiply) {
+            try OracleChainlink(oracle).CHAINLINK_DIVIDE_ADDRESS() returns (address _addr) {
+                if (_addr != address(0)) {
+                    try AggregatorInterface(_addr).latestAnswer() returns (int256 _price) {
+                        return _price;
+                    } catch { return 0; }
+                }
+            } catch { /* oracle doesn't support divide */ }
+        }
+
+        return 0;
     }
 }

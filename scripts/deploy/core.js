@@ -5,7 +5,7 @@ const path = require("path")
 const { verify } = require("../utils/verify")
 
 async function main() {
-    const [deployer, /*admin, borrower, lender*/] = await hre.ethers.getSigners();
+    const [deployer, , , lender] = await hre.ethers.getSigners();
 
     const admin = { address: '0x0E61A8fb14f6AC999646212D30b2192cd02080Dd' }
 
@@ -84,7 +84,7 @@ async function main() {
     console.log(`-------- core contracts deployment completed --------`)
 
     return {
-        deployer: deployer, //admin: admin, borrower: borrower, lender: lender,
+        deployer: deployer, lender: lender,
         timelock: timelock,
         lightlendWhitelist: lightlendWhitelist,
         lightlendPairRegistry: lightlendPairRegistry,

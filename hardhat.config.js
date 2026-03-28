@@ -37,15 +37,19 @@ module.exports = {
     solidity: {
         compilers: [
             {
-                version: "0.8.19",
+                version: "0.8.20",
                 settings: {
+                    evmVersion: "shanghai",
                     viaIR: true,
+                    debug: {
+                        revertStrings: "strip",
+                    },
                     metadata: {
                         bytecodeHash: "none",
                     },
                     optimizer: {
                         enabled: true,
-                        runs: 200,
+                        runs: 1,
                     },
                 },
             },

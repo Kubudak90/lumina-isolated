@@ -65,6 +65,7 @@ contract VariableInterestRate is IRateCalculatorV2 {
         require(_minFullUtilizationRate <= _maxFullUtilizationRate, "min > max full util rate");
         require(_rateHalfLife > 0, "rate half life is 0");
         require(_zeroUtilizationRate <= _vertexRatePercentOfDelta, "zero > vertex rate");
+        require(_zeroUtilizationRate <= _minFullUtilizationRate, "zero rate > min full util");
 
         suffix = _suffix;
         MIN_TARGET_UTIL = _minUtil;

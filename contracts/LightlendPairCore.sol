@@ -89,7 +89,8 @@ abstract contract LightlendPairCore is
     struct ExchangeRateInfo {
         address oracle;
         uint32 maxOracleDeviation; // % of larger number, 1e5 precision
-        uint184 lastTimestamp;
+        bool oneOracleBad;
+        uint176 lastTimestamp;
         uint256 lowExchangeRate;
         uint256 highExchangeRate;
     }
@@ -537,15 +538,17 @@ abstract contract LightlendPairCore is
             if (_oneOracleBad) emit WarnOracleData(_exchangeRateInfo.oracle);
 
             // Effects: Bookkeeping and write to storage
-            _exchangeRateInfo.lastTimestamp = uint184(block.timestamp);
+            _exchangeRateInfo.lastTimestamp = uint176(block.timestamp);
+            _exchangeRateInfo.oneOracleBad = _oneOracleBad;
             _exchangeRateInfo.lowExchangeRate = _lowExchangeRate;
             _exchangeRateInfo.highExchangeRate = _highExchangeRate;
             exchangeRateInfo = _exchangeRateInfo;
             emit UpdateExchangeRate(_lowExchangeRate, _highExchangeRate);
         } else {
-            // Use default return values if already updated this block
+            // Use cached return values — including persisted oracle bad flag
             _lowExchangeRate = _exchangeRateInfo.lowExchangeRate;
             _highExchangeRate = _exchangeRateInfo.highExchangeRate;
+            _oneOracleBad = _exchangeRateInfo.oneOracleBad;
         }
 
         uint256 _deviation = (DEVIATION_PRECISION *
@@ -590,7 +593,9 @@ abstract contract LightlendPairCore is
         totalAsset = _totalAsset;
 
         // Interactions
+        uint256 _balBefore = assetContract.balanceOf(address(this));
         assetContract.safeTransferFrom(msg.sender, address(this), _amount);
+        require(assetContract.balanceOf(address(this)) - _balBefore == _amount, "fee-on-transfer not supported");
         emit Deposit(msg.sender, _receiver, _amount, _shares);
     }
 
@@ -882,7 +887,9 @@ abstract contract LightlendPairCore is
 
         // Interactions
         if (_sender != address(this)) {
+            uint256 _balBefore = collateralContract.balanceOf(address(this));
             collateralContract.safeTransferFrom(_sender, address(this), _collateralAmount);
+            require(collateralContract.balanceOf(address(this)) - _balBefore == _collateralAmount, "fee-on-transfer not supported");
         }
         emit AddCollateral(_sender, _borrower, _collateralAmount);
     }
@@ -986,7 +993,9 @@ abstract contract LightlendPairCore is
 
         // Interactions
         if (_payer != address(this)) {
+            uint256 _balBefore = assetContract.balanceOf(address(this));
             assetContract.safeTransferFrom(_payer, address(this), _amountToRepay);
+            require(assetContract.balanceOf(address(this)) - _balBefore == _amountToRepay, "fee-on-transfer not supported");
         }
         emit RepayAsset(_payer, _borrower, _amountToRepay, _shares);
     }
@@ -1376,6 +1385,7 @@ abstract contract LightlendPairCore is
 
         // Handle "repay all" case to avoid dust
         uint256 _userShares = userBorrowShares[msg.sender];
+        uint256 _totalSwapOutput = _amountAssetOut;
         if (_sharesToRepay >= _userShares) {
             _sharesToRepay = _userShares;
             _amountAssetOut = _totalBorrow.toAmount(_sharesToRepay, true);
@@ -1390,6 +1400,12 @@ abstract contract LightlendPairCore is
             address(this),
             msg.sender
         );
+
+        // Refund excess swap output to user
+        uint256 _excessAsset = _totalSwapOutput - _amountAssetOut;
+        if (_excessAsset > 0) {
+            _assetContract.safeTransfer(msg.sender, _excessAsset);
+        }
 
         emit RepayAssetWithCollateral(
             msg.sender,
