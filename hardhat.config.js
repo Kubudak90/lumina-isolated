@@ -26,6 +26,11 @@ module.exports = {
             },
             chainId: 999,
             url: 'https://rpc.hyperliquid.xyz/evm'
+        },
+        baseSepolia: {
+            accounts: [process.env.DEPLOYER_PRIVATE_KEY],
+            chainId: 84532,
+            url: 'https://sepolia.base.org'
         }
     },
     paths: {
