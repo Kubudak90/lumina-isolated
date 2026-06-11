@@ -19,7 +19,35 @@ const { verify } = require("./utils/verify");
  *   npx hardhat run scripts/deploy-lighter.js --network lighterEvm
  */
 
+// ================================================================
+//  LighterEVM addresses — placeholders, must be replaced pre-deploy
+// ================================================================
+const USDC_ADDRESS = "0x0000000000000000000000000000000000000001"; // TODO: replace with actual USDC on LighterEVM
+const WETH_ADDRESS = "0x0000000000000000000000000000000000000002"; // TODO: replace with actual WETH on LighterEVM
+const ORACLE_ADDRESS = "0x0000000000000000000000000000000000000003"; // TODO: replace with actual oracle on LighterEVM
+
+// Refuses to run while the addresses above still hold their sentinel values,
+// so the script can't burn gas on steps 1-5 and then wire a dead pair config.
+function assertConfigured() {
+    const sentinels = {
+        USDC_ADDRESS,
+        WETH_ADDRESS,
+        ORACLE_ADDRESS,
+    };
+    const placeholders = Object.entries(sentinels)
+        .filter(([, addr]) => BigInt(addr) <= 0xffn)
+        .map(([name]) => name);
+    if (placeholders.length > 0) {
+        throw new Error(
+            `Refusing to deploy: placeholder addresses still set for ${placeholders.join(", ")}. ` +
+            "Fill in the constants at the top of scripts/deploy-lighter.js first."
+        );
+    }
+}
+
 async function main() {
+    assertConfigured();
+
     const [deployer] = await ethers.getSigners();
     console.log(`Deploying with account: ${deployer.address}`);
     console.log(`Account balance: ${ethers.formatEther(await ethers.provider.getBalance(deployer.address))} ETH`);
@@ -157,11 +185,6 @@ async function main() {
     //  6. Deploy first pair: USDC / WETH
     // ================================================================
     console.log(`-------- Deploying USDC/WETH Pair --------`);
-
-    // LighterEVM token addresses (update these to the actual addresses on LighterEVM)
-    const USDC_ADDRESS = "0x0000000000000000000000000000000000000001"; // TODO: replace with actual USDC on LighterEVM
-    const WETH_ADDRESS = "0x0000000000000000000000000000000000000002"; // TODO: replace with actual WETH on LighterEVM
-    const ORACLE_ADDRESS = "0x0000000000000000000000000000000000000003"; // TODO: replace with actual oracle on LighterEVM
 
     const pairConfig = {
         assetTokenAddress: USDC_ADDRESS,
