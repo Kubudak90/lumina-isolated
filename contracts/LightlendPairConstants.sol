@@ -31,4 +31,12 @@ abstract contract LightlendPairConstants {
     error SetterRevoked();
     error ExceedsMaxOracleDeviation();
     error InvalidReceiver();
+    error ZeroAddress();
+    error AssetEqualsCollateral();
+    error InvalidOracleDeviation();
+    error InvalidUtilizationRate();
+    error InvalidLTV();
+    error InvalidLiquidationFee();
+    error InvalidProtocolFee();
+    error InvalidSeedAmount();
 }

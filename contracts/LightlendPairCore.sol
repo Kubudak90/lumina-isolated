@@ -12,6 +12,7 @@ import {SafeERC20} from './libraries/SafeERC20.sol';
 import {IDualOracle} from './interfaces/IDualOracle.sol';
 import {IRateCalculatorV2} from './interfaces/IRateCalculatorV2.sol';
 import {ISwapper} from './interfaces/ISwapper.sol';
+import {LightlendPairValidation} from './libraries/LightlendPairValidation.sol';
 
 /// @title LightlendPairCore
 /// @notice An abstract contract which contains the core logic and storage for the LightlendPair
@@ -152,16 +153,21 @@ abstract contract LightlendPairCore is
                 uint256 _liquidationFee,
                 uint256 _protocolLiquidationFee
             ) = abi.decode(
-                _configData,
-                (address, address, address, uint32, address, uint64, uint256, uint256, uint256)
-            );
+                    _configData,
+                    (address, address, address, uint32, address, uint64, uint256, uint256, uint256)
+                );
 
-            require(_asset != address(0), "zero asset");
-            require(_collateral != address(0), "zero collateral");
-            require(_oracle != address(0), "zero oracle");
-            require(_rateContract != address(0), "zero rate contract");
-            require(_fullUtilizationRate > 0, "zero utilization rate");
-            require(_maxLTV > 0 && _maxLTV <= LTV_PRECISION, "invalid LTV");
+            LightlendPairValidation.validatePairTokens(_asset, _collateral);
+            LightlendPairValidation.validateOracle(_oracle, _maxOracleDeviation);
+            LightlendPairValidation.validateRateParams(_rateContract, _fullUtilizationRate);
+            LightlendPairValidation.validateLTV(_maxLTV);
+
+            uint256 _dirtyLiquidationFee = (_liquidationFee * 90_000) / LIQ_PRECISION; // 90% of clean fee
+            LightlendPairValidation.validateLiquidationFees(
+                _liquidationFee,
+                _dirtyLiquidationFee,
+                _protocolLiquidationFee
+            );
 
             // Pair Settings
             assetContract = IERC20(_asset);
@@ -179,7 +185,7 @@ abstract contract LightlendPairCore is
 
             //Liquidation Fee Settings
             cleanLiquidationFee = _liquidationFee;
-            dirtyLiquidationFee = (_liquidationFee * 90_000) / LIQ_PRECISION; // 90% of clean fee
+            dirtyLiquidationFee = _dirtyLiquidationFee;
             protocolLiquidationFee = _protocolLiquidationFee;
 
             // set maxLTV
@@ -394,21 +400,21 @@ abstract contract LightlendPairCore is
             if (
                 _results.interestEarned > 0 &&
                 (_results.interestEarned + _results.totalBorrow.amount > type(uint128).max ||
-                _results.interestEarned + _results.totalAsset.amount > type(uint128).max)
+                    _results.interestEarned + _results.totalAsset.amount > type(uint128).max)
             ) {
                 // Cap interest at the maximum safe value instead of silently skipping
                 uint256 maxBorrowHeadroom = type(uint128).max - _results.totalBorrow.amount;
                 uint256 maxAssetHeadroom = type(uint128).max - _results.totalAsset.amount;
-                _results.interestEarned = maxBorrowHeadroom < maxAssetHeadroom ? maxBorrowHeadroom : maxAssetHeadroom;
+                _results.interestEarned = maxBorrowHeadroom < maxAssetHeadroom
+                    ? maxBorrowHeadroom
+                    : maxAssetHeadroom;
                 if (_results.interestEarned == 0) {
-                    revert("interest overflow: protocol requires intervention");
+                    revert('interest overflow: protocol requires intervention');
                 }
             }
 
             // Accrue interest (if any) and fees iff no overflow
-            if (
-                _results.interestEarned > 0
-            ) {
+            if (_results.interestEarned > 0) {
                 // Increment totalBorrow and totalAsset by interestEarned
                 _results.totalBorrow.amount += uint128(_results.interestEarned);
                 _results.totalAsset.amount += uint128(_results.interestEarned);
@@ -530,9 +536,9 @@ abstract contract LightlendPairCore is
             ).getPrices();
 
             // Validate oracle prices
-            require(_lowExchangeRate > 0, "low exchange rate is 0");
-            require(_highExchangeRate > 0, "high exchange rate is 0");
-            require(_highExchangeRate >= _lowExchangeRate, "high < low");
+            require(_lowExchangeRate > 0, 'low exchange rate is 0');
+            require(_highExchangeRate > 0, 'high exchange rate is 0');
+            require(_highExchangeRate >= _lowExchangeRate, 'high < low');
 
             // If one oracle is bad data, emit an event for off-chain monitoring
             if (_oneOracleBad) emit WarnOracleData(_exchangeRateInfo.oracle);
@@ -595,7 +601,10 @@ abstract contract LightlendPairCore is
         // Interactions
         uint256 _balBefore = assetContract.balanceOf(address(this));
         assetContract.safeTransferFrom(msg.sender, address(this), _amount);
-        require(assetContract.balanceOf(address(this)) - _balBefore == _amount, "fee-on-transfer not supported");
+        require(
+            assetContract.balanceOf(address(this)) - _balBefore == _amount,
+            'fee-on-transfer not supported'
+        );
         emit Deposit(msg.sender, _receiver, _amount, _shares);
     }
 
@@ -889,7 +898,10 @@ abstract contract LightlendPairCore is
         if (_sender != address(this)) {
             uint256 _balBefore = collateralContract.balanceOf(address(this));
             collateralContract.safeTransferFrom(_sender, address(this), _collateralAmount);
-            require(collateralContract.balanceOf(address(this)) - _balBefore == _collateralAmount, "fee-on-transfer not supported");
+            require(
+                collateralContract.balanceOf(address(this)) - _balBefore == _collateralAmount,
+                'fee-on-transfer not supported'
+            );
         }
         emit AddCollateral(_sender, _borrower, _collateralAmount);
     }
@@ -995,7 +1007,10 @@ abstract contract LightlendPairCore is
         if (_payer != address(this)) {
             uint256 _balBefore = assetContract.balanceOf(address(this));
             assetContract.safeTransferFrom(_payer, address(this), _amountToRepay);
-            require(assetContract.balanceOf(address(this)) - _balBefore == _amountToRepay, "fee-on-transfer not supported");
+            require(
+                assetContract.balanceOf(address(this)) - _balBefore == _amountToRepay,
+                'fee-on-transfer not supported'
+            );
         }
         emit RepayAsset(_payer, _borrower, _amountToRepay, _shares);
     }
@@ -1034,7 +1049,7 @@ abstract contract LightlendPairCore is
     // ============================================================================================
     // Functions: Liquidations
     // ============================================================================================
-    
+
     /// @notice The ```Liquidate``` event is emitted when a liquidation occurs
     /// @param _borrower The borrower account for which the liquidation occurred
     /// @param _collateralForLiquidator The amount of Collateral Token transferred to the liquidator
@@ -1144,7 +1159,8 @@ abstract contract LightlendPairCore is
                     uint256 _maxWriteOff = (totalAsset.amount * MAX_BAD_DEBT_BPS) / 10000;
                     if (_amountToAdjust > _maxWriteOff) {
                         _amountToAdjust = uint128(_maxWriteOff);
-                        _sharesToAdjust = (_totalBorrow.toShares(_amountToAdjust, false)).toUint128();
+                        _sharesToAdjust = (_totalBorrow.toShares(_amountToAdjust, false))
+                            .toUint128();
                     }
 
                     // Enforce epoch-level cumulative cap

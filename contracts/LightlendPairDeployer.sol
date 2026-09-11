@@ -10,6 +10,7 @@ import {ILightlendWhitelist} from './interfaces/ILightlendWhitelist.sol';
 import {ILightlendPair} from './interfaces/ILightlendPair.sol';
 import {ILightlendPairRegistry} from './interfaces/ILightlendPairRegistry.sol';
 import {SafeERC20} from './libraries/SafeERC20.sol';
+import {LightlendPairValidation} from './libraries/LightlendPairValidation.sol';
 
 // solhint-disable no-inline-assembly
 
@@ -42,10 +43,24 @@ contract LightlendPairDeployer is Ownable {
     // Default swappers
     address[] public defaultSwappers;
 
-    /// @notice Amount of asset to seed into each pair on creation
-    uint256 amountToSeed;
+    /// @notice Default seed amount when no per-asset override is set. Public so the admin UI can read it.
+    uint256 public amountToSeed;
 
-    /// @notice Emits when a new pair is deployed
+    /// @notice Optional per-asset seed override. Non-zero values take precedence over `amountToSeed`.
+    mapping(address => uint256) public seedAmount;
+
+    constructor(ConstructorParams memory _params) Ownable() {
+        LightlendPairValidation.validateNonZero(_params.circuitBreaker);
+        LightlendPairValidation.validateNonZero(_params.comptroller);
+        LightlendPairValidation.validateNonZero(_params.timelock);
+        LightlendPairValidation.validateNonZero(_params.lightlendWhitelist);
+        LightlendPairValidation.validateNonZero(_params.lightlendPairRegistry);
+        circuitBreakerAddress = _params.circuitBreaker;
+        comptrollerAddress = _params.comptroller;
+        timelockAddress = _params.timelock;
+        lightlendWhitelistAddress = _params.lightlendWhitelist;
+        lightlendPairRegistryAddress = _params.lightlendPairRegistry;
+    }
     /// @notice The ```LogDeploy``` event is emitted when a new Pair is deployed
     /// @param address_ The address of the pair
     /// @param asset The address of the Asset Token contract
@@ -66,14 +81,6 @@ contract LightlendPairDeployer is Ownable {
 
     /// @notice List of the names of all deployed Pairs
     address[] public deployedPairsArray;
-
-    constructor(ConstructorParams memory _params) Ownable() {
-        circuitBreakerAddress = _params.circuitBreaker;
-        comptrollerAddress = _params.comptroller;
-        timelockAddress = _params.timelock;
-        lightlendWhitelistAddress = _params.lightlendWhitelist;
-        lightlendPairRegistryAddress = _params.lightlendPairRegistry;
-    }
 
     function version() external pure returns (uint256 _major, uint256 _minor, uint256 _patch) {
         return (5, 0, 0);
@@ -137,7 +144,7 @@ contract LightlendPairDeployer is Ownable {
                 _creationCode.length - 13_000
             );
             contractAddress2 = SSTORE2.write(_secondHalf);
-        }else {
+        } else {
             contractAddress2 = address(0);
         }
     }
@@ -145,6 +152,9 @@ contract LightlendPairDeployer is Ownable {
     /// @notice The ```setDefaultSwappers``` function is used to set default list of approved swappers
     /// @param _swappers The list of swappers to set as default allowed
     function setDefaultSwappers(address[] memory _swappers) external onlyOwner {
+        for (uint256 i = 0; i < _swappers.length; i++) {
+            LightlendPairValidation.validateNonZero(_swappers[i]);
+        }
         defaultSwappers = _swappers;
     }
 
@@ -156,6 +166,7 @@ contract LightlendPairDeployer is Ownable {
     /// @notice The ```setTimelock``` function sets the timelockAddress
     /// @param _newAddress the new time lock address
     function setTimelock(address _newAddress) external onlyOwner {
+        LightlendPairValidation.validateNonZero(_newAddress);
         emit SetTimelock(timelockAddress, _newAddress);
         timelockAddress = _newAddress;
     }
@@ -168,6 +179,7 @@ contract LightlendPairDeployer is Ownable {
     /// @notice The ```setRegistry``` function sets the lightlendPairRegistryAddress
     /// @param _newAddress The new address
     function setRegistry(address _newAddress) external onlyOwner {
+        LightlendPairValidation.validateNonZero(_newAddress);
         emit SetRegistry(lightlendPairRegistryAddress, _newAddress);
         lightlendPairRegistryAddress = _newAddress;
     }
@@ -180,6 +192,7 @@ contract LightlendPairDeployer is Ownable {
     /// @notice The ```setComptroller``` function sets the comptrollerAddress
     /// @param _newAddress The new address
     function setComptroller(address _newAddress) external onlyOwner {
+        LightlendPairValidation.validateNonZero(_newAddress);
         emit SetComptroller(comptrollerAddress, _newAddress);
         comptrollerAddress = _newAddress;
     }
@@ -192,6 +205,7 @@ contract LightlendPairDeployer is Ownable {
     /// @notice The ```setWhitelist``` function sets the lightlendWhitelistAddress
     /// @param _newAddress The new address
     function setWhitelist(address _newAddress) external onlyOwner {
+        LightlendPairValidation.validateNonZero(_newAddress);
         emit SetWhitelist(lightlendWhitelistAddress, _newAddress);
         lightlendWhitelistAddress = _newAddress;
     }
@@ -204,23 +218,41 @@ contract LightlendPairDeployer is Ownable {
     /// @notice The ```setCircuitBreaker``` function sets the circuitBreakerAddress
     /// @param _newAddress The new address
     function setCircuitBreaker(address _newAddress) external onlyOwner {
+        LightlendPairValidation.validateNonZero(_newAddress);
         emit SetCircuitBreaker(circuitBreakerAddress, _newAddress);
         circuitBreakerAddress = _newAddress;
     }
 
-        /// @notice the ```SetAmountToSeed``` event is emitted when the AmountToSeed is set
+    /// @notice the ```SetAmountToSeed``` event is emitted when the AmountToSeed is set
     /// @param oldAmountToSeed The old amount to seed new pairs
     /// @param newAmountToSeed The new amount to seed new pairs
     event SetAmountToSeed(uint256 oldAmountToSeed, uint256 newAmountToSeed);
 
-    /// @notice the ```setAmountToSeed``` function sets the amount of asset to seed a pair
-    ///         on creation
+    /// @notice the ```setAmountToSeed``` function sets the default amount of asset to seed a pair
     /// @param _amountToSeed The amount of assets to seed the newly created pairs
-    function setAmountToSeed(uint256 _amountToSeed) external {
-        require(msg.sender == owner(), "not owner");
-        require(_amountToSeed > 0 && _amountToSeed <= 1e18, "invalid seed amount");
+    function setAmountToSeed(uint256 _amountToSeed) external onlyOwner {
+        LightlendPairValidation.validateSeedAmount(_amountToSeed);
         emit SetAmountToSeed(amountToSeed, _amountToSeed);
         amountToSeed = _amountToSeed;
+    }
+
+    /// @notice Emitted when a per-asset seed override is set
+    event SetSeedAmount(address indexed asset, uint256 oldAmount, uint256 newAmount);
+
+    /// @notice Sets a per-asset seed override. Pass 0 to fall back to `amountToSeed`.
+    function setSeedAmount(address _asset, uint256 _amount) external onlyOwner {
+        LightlendPairValidation.validateNonZero(_asset);
+        if (_amount != 0) {
+            LightlendPairValidation.validateSeedAmount(_amount);
+        }
+        emit SetSeedAmount(_asset, seedAmount[_asset], _amount);
+        seedAmount[_asset] = _amount;
+    }
+
+    /// @notice Effective seed used for a given asset (per-asset override or default).
+    function seedAmountFor(address _asset) public view returns (uint256) {
+        uint256 perAsset = seedAmount[_asset];
+        return perAsset > 0 ? perAsset : amountToSeed;
     }
 
     // ============================================================================================
@@ -288,6 +320,7 @@ contract LightlendPairDeployer is Ownable {
             _configData,
             (address, address, address, uint32, address, uint64, uint256, uint256, uint256)
         );
+        LightlendPairValidation.validatePairTokens(_asset, _collateral);
 
         (string memory _name, string memory _symbol) = getNextNameSymbol(_asset, _collateral);
 
@@ -302,10 +335,10 @@ contract LightlendPairDeployer is Ownable {
 
         ILightlendPairRegistry(lightlendPairRegistryAddress).addPair(_pairAddress);
 
-
-        if (amountToSeed == 0) revert MustSeedPair();
-        IERC20(_asset).safeApprove(_pairAddress, amountToSeed);
-        ILightlendPair(_pairAddress).deposit(amountToSeed, address(this));
+        uint256 _seed = seedAmountFor(_asset);
+        if (_seed == 0) revert MustSeedPair();
+        IERC20(_asset).safeApprove(_pairAddress, _seed);
+        ILightlendPair(_pairAddress).deposit(_seed, address(this));
 
         emit LogDeploy(
             _pairAddress,
@@ -353,4 +386,7 @@ contract LightlendPairDeployer is Ownable {
     error WhitelistedDeployersOnly();
     error Create2Failed();
     error MustSeedPair();
+    error ZeroAddress();
+    error InvalidSeedAmount();
+    error AssetEqualsCollateral();
 }
