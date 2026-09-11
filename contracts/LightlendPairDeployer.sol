@@ -43,7 +43,7 @@ contract LightlendPairDeployer is Ownable {
     address[] public defaultSwappers;
 
     /// @notice Amount of asset to seed into each pair on creation
-    uint256 amountToSeed;
+    uint256 public amountToSeed;
 
     /// @notice Emits when a new pair is deployed
     /// @notice The ```LogDeploy``` event is emitted when a new Pair is deployed

@@ -8,27 +8,21 @@ module.exports = {
     networks: {
         hardhat: {
             gas: "auto",
-            accounts: {
-                mnemonic,
-            },
+            ...(mnemonic ? { accounts: { mnemonic } } : {}),
             chainId: 1337,
         },
         lighterEvmTestnet: {
-            accounts: {
-                mnemonic,
-            },
+            accounts: mnemonic ? { mnemonic } : [],
             chainId: 998,
             url: 'https://rpc.hyperliquid-testnet.xyz/evm',
         },
         lighterEvm: {
-            accounts: {
-                mnemonic,
-            },
+            accounts: mnemonic ? { mnemonic } : [],
             chainId: 999,
             url: 'https://rpc.hyperliquid.xyz/evm'
         },
         baseSepolia: {
-            accounts: [process.env.DEPLOYER_PRIVATE_KEY],
+            accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
             chainId: 84532,
             url: 'https://sepolia.base.org'
         }
@@ -90,3 +84,4 @@ module.exports = {
     //     browserUrl: "https://purrsec.com/",
     // }
 };
+
