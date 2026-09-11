@@ -45,8 +45,21 @@ function assertConfigured() {
     }
 }
 
+const BASE_SEPOLIA_CHAIN_ID = 84532n;
+
+async function assertEvmChain() {
+    const network = await ethers.provider.getNetwork();
+    if (network.chainId !== BASE_SEPOLIA_CHAIN_ID) {
+        throw new Error(
+            `Refusing to deploy: expected Base Sepolia (${BASE_SEPOLIA_CHAIN_ID}), got chainId ${network.chainId}. ` +
+            "Lighter REST endpoints are not a general-purpose EVM RPC."
+        );
+    }
+}
+
 async function main() {
     assertConfigured();
+    await assertEvmChain();
 
     const [deployer] = await ethers.getSigners();
     console.log(`Deploying with account: ${deployer.address}`);

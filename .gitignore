@@ -2,15 +2,21 @@
 .DS_Store
 node_modules
 
-# env
+# env / secrets
 .env
+.claude/
+**/.claude/
+*.key
 
 # foundry
 out
 cache
+cache_forge
 
 # hardhat
 artifacts
+coverage
+coverage.json
 
 # typechain
 typechain

@@ -114,6 +114,10 @@ describe("BaseTest", function () {
         expect(await pair.balanceOf(data.lender.address)).to.equal(ethers.parseUnits("0", 18))
 
         expect(await data.mockTokens.USDC.balanceOf(data.lender.address)).to.equal(ethers.parseUnits("100", 6))
-        expect(await data.mockTokens.WETH.balanceOf(data.lender.address)).to.equal(ethers.parseUnits("10", 18))
+        // ERC-4626 redeem can leave 1 wei of assets in the vault from rounding.
+        expect(await data.mockTokens.WETH.balanceOf(data.lender.address)).to.be.closeTo(
+            ethers.parseUnits("10", 18),
+            1n
+        );
     });
 });

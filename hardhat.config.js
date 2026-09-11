@@ -1,7 +1,13 @@
-require("dotenv").config()
+require("dotenv").config();
 require("@nomicfoundation/hardhat-toolbox");
 
-const mnemonic = process.env.MNEMONIC
+const TEST_MNEMONIC = "test test test test test test test test test test test junk";
+const mnemonic = process.env.MNEMONIC || TEST_MNEMONIC;
+
+function deployerAccounts() {
+    const key = process.env.DEPLOYER_PRIVATE_KEY;
+    return key ? [key] : [];
+}
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
@@ -13,25 +19,11 @@ module.exports = {
             },
             chainId: 1337,
         },
-        lighterEvmTestnet: {
-            accounts: {
-                mnemonic,
-            },
-            chainId: 998,
-            url: 'https://rpc.hyperliquid-testnet.xyz/evm',
-        },
-        lighterEvm: {
-            accounts: {
-                mnemonic,
-            },
-            chainId: 999,
-            url: 'https://rpc.hyperliquid.xyz/evm'
-        },
         baseSepolia: {
-            accounts: [process.env.DEPLOYER_PRIVATE_KEY],
+            accounts: deployerAccounts(),
             chainId: 84532,
-            url: 'https://sepolia.base.org'
-        }
+            url: "https://sepolia.base.org",
+        },
     },
     paths: {
         artifacts: "./artifacts",
@@ -62,31 +54,7 @@ module.exports = {
     },
     etherscan: {
         apiKey: {
-            lighterEvmTestnet: "empty",
-            lighterEvm: process.env.ETHERSCAN
+            baseSepolia: process.env.ETHERSCAN_API_KEY_BASE || process.env.ETHERSCAN || "",
         },
-        customChains: [
-            {
-                network: "lighterEvmTestnet",
-                chainId: 998,
-                urls: {
-                    apiURL: "https://explorer.lightlend.finance/api",
-                    browserURL: "https://explorer.lightlend.finance"
-                }
-            },
-            {
-                network: "lighterEvm",
-                chainId: 999,
-                urls: {
-                    apiURL: "https://api.etherscan.io/v2/api?chainid=999",
-                    browserURL: "https://www.hyperscan.com"
-                }
-            }
-        ]
     },
-    // sourcify: {
-    //     enabled: true,
-    //     apiUrl: "https://sourcify.parsec.finance",
-    //     browserUrl: "https://purrsec.com/",
-    // }
 };
