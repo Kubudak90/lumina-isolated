@@ -1,20 +1,14 @@
-# HyperLend Isolated
+# Lumina Isolated
 
----
+Isolated two-asset lending pairs for Lumina. Contracts are a fork of [FraxLend V3](https://docs.frax.finance/fraxlend/fraxlend-overview) (previously branded HyperLend Isolated); see [diffs](https://gist.github.com/fbslo/0ca194e7b0b5b1942a84b53450341f43).
 
-### Introduction to HyperLend Isolated
+Lenders deposit an ERC-20 into the pair and receive EIP-4626 yield-bearing shares.
 
-HyperLend Isolated is a lending platform that allows users to create an isolated market between a pair of ERC-20 tokens. 
-
-Contracts are a fork of [FraxLend V3](https://docs.frax.finance/fraxlend/fraxlend-overview), see [diffs](https://gist.github.com/fbslo/0ca194e7b0b5b1942a84b53450341f43).
-
-HyperLend Isolated adheres to the EIP-4626: Tokenized Vault Standard, lenders are able to deposit ERC-20 assets into the pair and receive yield-bearing hTokens.  
+See `NOTICE.md` for attribution.
 
 ### Overview
 
 ![pairOverview](./documentation/images/pairOverview.jpg)
-
----
 
 ### Building and Testing
 
@@ -28,8 +22,6 @@ Compilation:
 Tests:
 
 - `npx hardhat test`
-
----
 
 ### License
 
