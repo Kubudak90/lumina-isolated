@@ -4,6 +4,7 @@ pragma solidity ^0.8.19;
 import {Ownable2Step, Ownable} from '@openzeppelin/contracts/access/Ownable2Step.sol';
 import {Timelock2Step} from './Timelock2Step.sol';
 import {LightlendPairAccessControlErrors} from './LightlendPairAccessControlErrors.sol';
+import {LightlendPairValidation} from './libraries/LightlendPairValidation.sol';
 
 /// @title LightlendPairAccessControl
 /// @notice An abstract contract which contains the access control logic for LightlendPair
@@ -45,9 +46,9 @@ abstract contract LightlendPairAccessControl is
             address _comptrollerAddress,
             address _timelockAddress
         ) = abi.decode(_immutables, (address, address, address));
-        require(_comptrollerAddress != address(0), "zero comptroller");
-        require(_circuitBreakerAddress != address(0), "zero circuit breaker");
-        require(_timelockAddress != address(0), "zero timelock");
+        require(_comptrollerAddress != address(0), 'zero comptroller');
+        require(_circuitBreakerAddress != address(0), 'zero circuit breaker');
+        require(_timelockAddress != address(0), 'zero timelock');
         _setTimelock(_timelockAddress);
         _transferOwnership(_comptrollerAddress);
 
@@ -199,6 +200,7 @@ abstract contract LightlendPairAccessControl is
     /// @param _newCircuitBreaker The new circuit breaker address
     function setCircuitBreaker(address _newCircuitBreaker) external virtual {
         _requireTimelock();
+        LightlendPairValidation.validateNonZero(_newCircuitBreaker);
         _setCircuitBreaker(_newCircuitBreaker);
     }
 }

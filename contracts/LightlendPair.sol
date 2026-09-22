@@ -13,6 +13,7 @@ import {SafeERC20} from './libraries/SafeERC20.sol';
 import {VaultAccount, VaultAccountingLibrary} from './libraries/VaultAccount.sol';
 import {IRateCalculatorV2} from './interfaces/IRateCalculatorV2.sol';
 import {ISwapper} from './interfaces/ISwapper.sol';
+import {LightlendPairValidation} from './libraries/LightlendPairValidation.sol';
 
 /// @title LightlendPair
 /// @notice The LightlendPair is a lending pair that allows users to engage in lending and borrowing activities
@@ -217,7 +218,7 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     }
 
     function pricePerShare() external view returns (uint256 _amount) {
-        _amount = toAssetAmount(1e18, false, true);
+        _amount = toAssetAmount(10 ** decimals(), false, true);
     }
 
     function totalAssets() external view returns (uint256) {
@@ -319,8 +320,7 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     function setOracle(address _newOracle, uint32 _newMaxOracleDeviation) external {
         _requireTimelock();
         if (isOracleSetterRevoked) revert SetterRevoked();
-        require(_newOracle != address(0), "zero oracle");
-        require(_newMaxOracleDeviation > 0 && _newMaxOracleDeviation < uint32(DEVIATION_PRECISION), "invalid deviation");
+        LightlendPairValidation.validateOracle(_newOracle, _newMaxOracleDeviation);
         ExchangeRateInfo memory _exchangeRateInfo = exchangeRateInfo;
         emit SetOracleInfo(
             _exchangeRateInfo.oracle,
@@ -355,8 +355,7 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     function setMaxLTV(uint256 _newMaxLTV) external {
         _requireTimelock();
         if (isMaxLTVSetterRevoked) revert SetterRevoked();
-        require(_newMaxLTV > 0, "maxLTV cannot be 0");
-        require(_newMaxLTV <= LTV_PRECISION, "maxLTV exceeds 100%");
+        LightlendPairValidation.validateLTV(_newMaxLTV);
         emit SetMaxLTV(maxLTV, _newMaxLTV);
         maxLTV = _newMaxLTV;
     }
@@ -383,7 +382,7 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     function setRateContract(address _newRateContract) external {
         _requireTimelock();
         if (isRateContractSetterRevoked) revert SetterRevoked();
-        require(_newRateContract != address(0), "zero rate contract");
+        LightlendPairValidation.validateNonZero(_newRateContract);
         emit SetRateContract(address(rateContract), _newRateContract);
         rateContract = IRateCalculatorV2(_newRateContract);
     }
@@ -426,18 +425,10 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     ) external {
         _requireTimelock();
         if (isLiquidationFeeSetterRevoked) revert SetterRevoked();
-        require(_newCleanLiquidationFee > 0, "clean fee must be > 0");
-        require(_newDirtyLiquidationFee > 0, "dirty fee must be > 0");
-        require(_newCleanLiquidationFee <= 50_000, "clean fee too high");
-        require(_newDirtyLiquidationFee <= 50_000, "dirty fee too high");
-        require(_newProtocolLiquidationFee < LIQ_PRECISION, "protocol fee >= 100%");
-        require(
-            _newCleanLiquidationFee + _newProtocolLiquidationFee < LIQ_PRECISION,
-            "clean + protocol fee >= 100%"
-        );
-        require(
-            _newDirtyLiquidationFee + _newProtocolLiquidationFee < LIQ_PRECISION,
-            "dirty + protocol fee >= 100%"
+        LightlendPairValidation.validateLiquidationFees(
+            _newCleanLiquidationFee,
+            _newDirtyLiquidationFee,
+            _newProtocolLiquidationFee
         );
         emit SetLiquidationFees(
             cleanLiquidationFee,
@@ -461,9 +452,7 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     function changeFee(uint32 _newFee) external {
         _requireTimelock();
         if (isInterestPaused) revert InterestPaused();
-        if (_newFee > MAX_PROTOCOL_FEE) {
-            revert BadProtocolFee();
-        }
+        LightlendPairValidation.validateProtocolFee(_newFee);
         _addInterest();
         currentRateInfo.feeToProtocolRate = _newFee;
         emit ChangeFee(_newFee);
@@ -518,7 +507,11 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     /// @param _swapper The swapper address
     /// @param _approval The approval
     function setSwapper(address _swapper, bool _approval) external {
-        require(msg.sender == owner() || (msg.sender == DEPLOYER_ADDRESS && !deployerSwapperRevoked), "unauthorized");
+        require(
+            msg.sender == owner() || (msg.sender == DEPLOYER_ADDRESS && !deployerSwapperRevoked),
+            'unauthorized'
+        );
+        LightlendPairValidation.validateNonZero(_swapper);
         swappers[_swapper] = _approval;
         emit SetSwapper(_swapper, _approval);
     }
@@ -532,28 +525,28 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     // Functions: Access Control
     // ============================================================================================
 
-    /// @notice The ```pause``` function is called to pause all contract functionality
+    /// @notice Emergency pause freezes new risk: borrow, deposit, withdraw, and interest.
+    /// @dev Repayment stays enabled so borrowers can reduce debt during an incident.
+    ///      Liquidation stays enabled so insolvency can still be processed. Use
+    ///      `pauseLiquidate` / `pauseRepay` only for a targeted exploit response.
+    ///      Those narrower flags are not toggled here or in `unpause`.
     function pause() external {
         _requireProtocolOrOwner();
         if (!isBorrowAccessControlRevoked) _setBorrowLimit(0);
         if (!isDepositAccessControlRevoked) _setDepositLimit(0);
-        if (!isRepayAccessControlRevoked) _pauseRepay(true);
         if (!isWithdrawAccessControlRevoked) _pauseWithdraw(true);
-        if (!isLiquidateAccessControlRevoked) _pauseLiquidate(true);
         if (!isInterestAccessControlRevoked) {
             _addInterest();
             _pauseInterest(true);
         }
     }
 
-    /// @notice The ```unpause``` function is called to unpause all contract functionality
+    /// @notice Reverses emergency pause. Does not change repay or liquidation flags.
     function unpause() external {
         _requireTimelockOrOwner();
         if (!isBorrowAccessControlRevoked) _setBorrowLimit(type(uint256).max);
         if (!isDepositAccessControlRevoked) _setDepositLimit(type(uint256).max);
-        if (!isRepayAccessControlRevoked) _pauseRepay(false);
         if (!isWithdrawAccessControlRevoked) _pauseWithdraw(false);
-        if (!isLiquidateAccessControlRevoked) _pauseLiquidate(false);
         if (!isInterestAccessControlRevoked) {
             _addInterest();
             currentRateInfo.lastTimestamp = uint64(block.timestamp);
