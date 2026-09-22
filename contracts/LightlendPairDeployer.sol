@@ -260,7 +260,7 @@ contract LightlendPairDeployer is Ownable {
     // ============================================================================================
 
     /// @notice The ```_deploy``` function is an internal function with deploys the pair
-    /// @param _configData abi.encode(address _asset, address _collateral, address _oracle, uint32 _maxOracleDeviation, address _rateContract, uint64 _fullUtilizationRate, uint256 _maxLTV, uint256 _cleanLiquidationFee, uint256 _dirtyLiquidationFee, uint256 _protocolLiquidationFee)
+    /// @param _configData abi.encode(address _asset, address _collateral, address _oracle, uint32 _maxOracleDeviation, address _rateContract, uint64 _fullUtilizationRate, uint256 _maxLTV, uint256 _cleanLiquidationFee, uint256 _protocolLiquidationFee). Dirty liquidation fee is derived inside the pair as 90% of the clean fee.
     /// @param _immutables abi.encode(address _circuitBreakerAddress, address _comptrollerAddress, address _timelockAddress)
     /// @param _customConfigData abi.encode(string memory _nameOfContract, string memory _symbolOfContract, uint8 _decimalsOfContract)
     /// @return _pairAddress The address to which the Pair was deployed
