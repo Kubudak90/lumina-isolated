@@ -1140,7 +1140,8 @@ abstract contract LightlendPairCore is
             // the value of the debt repaid. No bonus (e.g. an underwater clean liquidation) means no fee.
             // The >= 2% net-bonus rule (LightlendPairValidation.validateLiquidationFees) bounds the fee
             // parameters only. The realized net bonus is lower when the clean path takes all remaining
-            // collateral of a position at or under water (e.g. 0.9 WETH debt at $3,300 against
+            // collateral because it cannot cover the repaid principal plus the full clean bonus, even
+            // with positive equity (e.g. 0.9 WETH debt at $3,300 against
             // 3,000 USDC: 0.91% net, no write-off), and can be lower on dust amounts through rounding.
             if (
                 protocolLiquidationFee > 0 &&

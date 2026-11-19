@@ -72,8 +72,9 @@ library LightlendPairValidation {
     ///      parameters must leave at least MIN_LIQUIDATOR_NET_BONUS (2%):
     ///      fee * (LIQ_PRECISION - protocolFee) >= MIN_LIQUIDATOR_NET_BONUS * LIQ_PRECISION.
     ///      The 2% is a floor on the fee PARAMETERS, not a guarantee on every liquidation. The realized
-    ///      net bonus is lower when the clean path takes all remaining collateral of a position that is
-    ///      at or under water (collateral < repaid value * (1 + cleanFee)): e.g. 0.9 WETH of debt at
+    ///      net bonus is lower when the clean path takes all remaining collateral because it cannot
+    ///      cover the repaid principal plus the full clean bonus (collateral < repaid value *
+    ///      (1 + cleanFee)), even with positive equity: e.g. 0.9 WETH of debt at
     ///      $3,300 against 3,000 USDC nets the liquidator 0.91% with no write-off. It can also be lower
     ///      on dust amounts, through rounding.
     ///      The dirty fee must not exceed the clean fee. The dirty path is taken only when
