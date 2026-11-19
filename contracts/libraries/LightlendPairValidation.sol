@@ -68,9 +68,18 @@ library LightlendPairValidation {
 
     /// @notice Checks the liquidation fees (ISO-01)
     /// @dev The protocol fee is a share of the liquidation bonus only (see LightlendPairCore.liquidate),
-    ///      so a liquidator repaying X keeps X * fee * (1 - protocolFee) as net bonus. Both the clean
-    ///      and the dirty path must leave at least MIN_LIQUIDATOR_NET_BONUS (2%):
+    ///      so a liquidator repaying X keeps X * fee * (1 - protocolFee) as net bonus. Both fee
+    ///      parameters must leave at least MIN_LIQUIDATOR_NET_BONUS (2%):
     ///      fee * (LIQ_PRECISION - protocolFee) >= MIN_LIQUIDATOR_NET_BONUS * LIQ_PRECISION.
+    ///      The 2% is a floor on the fee PARAMETERS, not a guarantee on every liquidation. The realized
+    ///      net bonus is lower when the clean path takes all remaining collateral of a position that is
+    ///      at or under water (collateral < repaid value * (1 + cleanFee)): e.g. 0.9 WETH of debt at
+    ///      $3,300 against 3,000 USDC nets the liquidator 0.91% with no write-off. It can also be lower
+    ///      on dust amounts, through rounding.
+    ///      The dirty fee must not exceed the clean fee. The dirty path is taken only when
+    ///      leftover = collateral - repaid * (1 + cleanFee) > 0, so with dirtyFee <= cleanFee the dirty
+    ///      seizure repaid * (1 + dirtyFee) <= repaid * (1 + cleanFee) < collateral (both rounded down):
+    ///      a dirty liquidation never tries to seize more collateral than the borrower has.
     /// @param _cleanLiquidationFee Bonus (share of repaid value) when all collateral is taken, LIQ_PRECISION
     /// @param _dirtyLiquidationFee Bonus (share of repaid value) on a partial liquidation, LIQ_PRECISION
     /// @param _protocolLiquidationFee Protocol share of the bonus, LIQ_PRECISION
@@ -85,6 +94,7 @@ library LightlendPairValidation {
         ) {
             revert InvalidLiquidationFee();
         }
+        if (_dirtyLiquidationFee > _cleanLiquidationFee) revert InvalidLiquidationFee();
         if (_protocolLiquidationFee >= LIQ_PRECISION) revert InvalidLiquidationFee();
         uint256 _liquidatorShare = LIQ_PRECISION - _protocolLiquidationFee;
         if (

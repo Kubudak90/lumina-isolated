@@ -403,15 +403,16 @@ abstract contract LightlendPairCore is
                 (_results.interestEarned + _results.totalBorrow.amount > type(uint128).max ||
                     _results.interestEarned + _results.totalAsset.amount > type(uint128).max)
             ) {
-                // Cap interest at the maximum safe value instead of silently skipping
+                // Cap interest at the remaining uint128 headroom. Once there is no headroom left the
+                // cap is 0 and nothing accrues (FraxLend's original skip semantics), while the rate info
+                // and lastTimestamp still update in _addInterest. It must never revert here: every
+                // entry point, including pause(), repayAsset() and liquidate(), runs _addInterest()
+                // first, so a revert would freeze debt reduction exactly when the pair is at its ceiling.
                 uint256 maxBorrowHeadroom = type(uint128).max - _results.totalBorrow.amount;
                 uint256 maxAssetHeadroom = type(uint128).max - _results.totalAsset.amount;
                 _results.interestEarned = maxBorrowHeadroom < maxAssetHeadroom
                     ? maxBorrowHeadroom
                     : maxAssetHeadroom;
-                if (_results.interestEarned == 0) {
-                    revert('interest overflow: protocol requires intervention');
-                }
             }
 
             // Accrue interest (if any) and fees iff no overflow
@@ -1137,6 +1138,10 @@ abstract contract LightlendPairCore is
 
             // ISO-01: the protocol takes its share of the bonus only, i.e. of the collateral seized beyond
             // the value of the debt repaid. No bonus (e.g. an underwater clean liquidation) means no fee.
+            // The >= 2% net-bonus rule (LightlendPairValidation.validateLiquidationFees) bounds the fee
+            // parameters only. The realized net bonus is lower when the clean path takes all remaining
+            // collateral of a position at or under water (e.g. 0.9 WETH debt at $3,300 against
+            // 3,000 USDC: 0.91% net, no write-off), and can be lower on dust amounts through rounding.
             if (
                 protocolLiquidationFee > 0 &&
                 _collateralForLiquidator > _liquidationAmountInCollateralUnits
