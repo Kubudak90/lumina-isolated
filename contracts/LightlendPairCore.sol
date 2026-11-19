@@ -52,8 +52,8 @@ abstract contract LightlendPairCore is
     /// @notice The liquidation fee, given as % of repayment amount, when some collateral remains for borrower
     /// @dev 1e5 precision
     uint256 public dirtyLiquidationFee;
-    /// @notice The portion of the liquidation fee given to protocol
-    /// @dev 1e5 precision
+    /// @notice The share of the liquidation bonus (collateral seized beyond the repaid debt value) given to protocol
+    /// @dev 1e5 precision. Applies to the bonus only, never to the whole seized collateral (ISO-01)
     uint256 public protocolLiquidationFee;
 
     // Interest Rate Calculator Contract
@@ -160,7 +160,6 @@ abstract contract LightlendPairCore is
             LightlendPairValidation.validatePairTokens(_asset, _collateral);
             LightlendPairValidation.validateOracle(_oracle, _maxOracleDeviation);
             LightlendPairValidation.validateRateParams(_rateContract, _fullUtilizationRate);
-            LightlendPairValidation.validateLTV(_maxLTV);
 
             uint256 _dirtyLiquidationFee = (_liquidationFee * 90_000) / LIQ_PRECISION; // 90% of clean fee
             LightlendPairValidation.validateLiquidationFees(
@@ -168,6 +167,8 @@ abstract contract LightlendPairCore is
                 _dirtyLiquidationFee,
                 _protocolLiquidationFee
             );
+            // After the fee checks, so _liquidationFee is bounded (ISO-05)
+            LightlendPairValidation.validateLTV(_maxLTV, _liquidationFee);
 
             // Pair Settings
             assetContract = IERC20(_asset);
@@ -1134,8 +1135,16 @@ abstract contract LightlendPairCore is
                 : (_liquidationAmountInCollateralUnits * (LIQ_PRECISION + dirtyLiquidationFee)) /
                     LIQ_PRECISION;
 
-            if (protocolLiquidationFee > 0) {
-                _feesAmount = (protocolLiquidationFee * _collateralForLiquidator) / LIQ_PRECISION;
+            // ISO-01: the protocol takes its share of the bonus only, i.e. of the collateral seized beyond
+            // the value of the debt repaid. No bonus (e.g. an underwater clean liquidation) means no fee.
+            if (
+                protocolLiquidationFee > 0 &&
+                _collateralForLiquidator > _liquidationAmountInCollateralUnits
+            ) {
+                _feesAmount =
+                    (protocolLiquidationFee *
+                        (_collateralForLiquidator - _liquidationAmountInCollateralUnits)) /
+                    LIQ_PRECISION;
                 _collateralForLiquidator = _collateralForLiquidator - _feesAmount;
             }
         }

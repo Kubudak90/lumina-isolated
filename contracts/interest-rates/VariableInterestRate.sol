@@ -57,14 +57,30 @@ contract VariableInterestRate is IRateCalculatorV2 {
         uint256 _maxFullUtilizationRate,
         uint256 _rateHalfLife
     ) {
-        // Validate constructor parameters
+        // Validate constructor parameters (ISO-04). Together these keep getNewRate() free of
+        // division by zero, underflow, overflow and uint64 truncation for every utilization in
+        // [0, UTIL_PREC], every _deltaTime < 2^64 and every uint64 _fullUtilizationInterest, so the
+        // pair's _addInterest() (run by pause(), repay, liquidate, ...) cannot be bricked by the rate:
+        //  - maxUtil < UTIL_PREC: getFullUtilizationInterest divides by (UTIL_PREC - MAX_TARGET_UTIL).
+        //  - 0 < vertexUtilization < UTIL_PREC: getNewRate divides by VERTEX_UTILIZATION and by
+        //    (UTIL_PREC - VERTEX_UTILIZATION); vertex == 100% divided by zero at full utilization.
+        //  - vertexRatePercentOfDelta <= RATE_PREC: keeps the vertex rate <= the full-utilization rate,
+        //    otherwise (_newFullUtilizationInterest - _vertexInterest) underflows at/above the vertex.
+        //  - zero <= minFull <= maxFull <= type(uint64).max: the clamped full rate is exact (no
+        //    truncating uint64 cast) and never below ZERO_UTIL_RATE, so (_new - ZERO_UTIL_RATE) is safe.
+        //  - 0 < rateHalfLife <= type(uint64).max: non-zero divisor; bounds
+        //    _fullUtilizationInterest * (RATE_HALF_LIFE * 1e36 + 1e36 * _deltaTime) below 2^256.
+        // The old `_zeroUtilizationRate <= _vertexRatePercentOfDelta` check compared a per-second rate
+        // with a 1e18 percentage, so it guarded nothing and is removed.
         require(_minUtil <= _maxUtil, "min > max target util");
-        require(_maxUtil <= UTIL_PREC, "target util > 100%");
+        require(_maxUtil < UTIL_PREC, "target util >= 100%");
         require(_vertexUtilization > 0, "vertex util is 0");
-        require(_vertexUtilization <= UTIL_PREC, "vertex util > 100%");
+        require(_vertexUtilization < UTIL_PREC, "vertex util >= 100%");
+        require(_vertexRatePercentOfDelta <= RATE_PREC, "vertex rate percent > 100%");
         require(_minFullUtilizationRate <= _maxFullUtilizationRate, "min > max full util rate");
+        require(_maxFullUtilizationRate <= type(uint64).max, "max full util rate > uint64");
         require(_rateHalfLife > 0, "rate half life is 0");
-        require(_zeroUtilizationRate <= _vertexRatePercentOfDelta, "zero > vertex rate");
+        require(_rateHalfLife <= type(uint64).max, "rate half life > uint64");
         require(_zeroUtilizationRate <= _minFullUtilizationRate, "zero rate > min full util");
 
         suffix = _suffix;
