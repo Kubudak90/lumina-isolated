@@ -355,7 +355,7 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     function setMaxLTV(uint256 _newMaxLTV) external {
         _requireTimelock();
         if (isMaxLTVSetterRevoked) revert SetterRevoked();
-        LightlendPairValidation.validateLTV(_newMaxLTV);
+        LightlendPairValidation.validateLTV(_newMaxLTV, cleanLiquidationFee);
         emit SetMaxLTV(maxLTV, _newMaxLTV);
         maxLTV = _newMaxLTV;
     }
@@ -418,6 +418,7 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     /// @notice The ```setLiquidationFees``` function sets the liquidation fees
     /// @param _newCleanLiquidationFee The new clean liquidation fee
     /// @param _newDirtyLiquidationFee The new dirty liquidation fee
+    /// @param _newProtocolLiquidationFee The new protocol share of the liquidation bonus
     function setLiquidationFees(
         uint256 _newCleanLiquidationFee,
         uint256 _newDirtyLiquidationFee,
@@ -430,6 +431,8 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
             _newDirtyLiquidationFee,
             _newProtocolLiquidationFee
         );
+        // ISO-05: the new clean fee must still satisfy maxLTV * (1 + cleanFee) <= 98%
+        LightlendPairValidation.validateLTV(maxLTV, _newCleanLiquidationFee);
         emit SetLiquidationFees(
             cleanLiquidationFee,
             dirtyLiquidationFee,

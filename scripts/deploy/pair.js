@@ -13,7 +13,7 @@ async function main({
     fullUtilizationRate = "9500000000", //
     maxLTV = "75000", //75%
     cleanLiquidationFee = "10000", //10%
-    protocolLiquidationFee = "1000" //10% of the liquidator's fee
+    protocolLiquidationFee = "1000" //1% of the liquidation bonus
 }) {
     const LightlendPairDeployer = await ethers.getContractFactory("LightlendPairDeployer");
     const lightlendPairDeployer = LightlendPairDeployer.attach(lightlendPairDeployerAddress)

@@ -52,8 +52,8 @@ abstract contract LightlendPairCore is
     /// @notice The liquidation fee, given as % of repayment amount, when some collateral remains for borrower
     /// @dev 1e5 precision
     uint256 public dirtyLiquidationFee;
-    /// @notice The portion of the liquidation fee given to protocol
-    /// @dev 1e5 precision
+    /// @notice The share of the liquidation bonus (collateral seized beyond the repaid debt value) given to protocol
+    /// @dev 1e5 precision. Applies to the bonus only, never to the whole seized collateral (ISO-01)
     uint256 public protocolLiquidationFee;
 
     // Interest Rate Calculator Contract
@@ -160,7 +160,6 @@ abstract contract LightlendPairCore is
             LightlendPairValidation.validatePairTokens(_asset, _collateral);
             LightlendPairValidation.validateOracle(_oracle, _maxOracleDeviation);
             LightlendPairValidation.validateRateParams(_rateContract, _fullUtilizationRate);
-            LightlendPairValidation.validateLTV(_maxLTV);
 
             uint256 _dirtyLiquidationFee = (_liquidationFee * 90_000) / LIQ_PRECISION; // 90% of clean fee
             LightlendPairValidation.validateLiquidationFees(
@@ -168,6 +167,8 @@ abstract contract LightlendPairCore is
                 _dirtyLiquidationFee,
                 _protocolLiquidationFee
             );
+            // After the fee checks, so _liquidationFee is bounded (ISO-05)
+            LightlendPairValidation.validateLTV(_maxLTV, _liquidationFee);
 
             // Pair Settings
             assetContract = IERC20(_asset);
@@ -402,15 +403,16 @@ abstract contract LightlendPairCore is
                 (_results.interestEarned + _results.totalBorrow.amount > type(uint128).max ||
                     _results.interestEarned + _results.totalAsset.amount > type(uint128).max)
             ) {
-                // Cap interest at the maximum safe value instead of silently skipping
+                // Cap interest at the remaining uint128 headroom. Once there is no headroom left the
+                // cap is 0 and nothing accrues (FraxLend's original skip semantics), while the rate info
+                // and lastTimestamp still update in _addInterest. It must never revert here: every
+                // entry point, including pause(), repayAsset() and liquidate(), runs _addInterest()
+                // first, so a revert would freeze debt reduction exactly when the pair is at its ceiling.
                 uint256 maxBorrowHeadroom = type(uint128).max - _results.totalBorrow.amount;
                 uint256 maxAssetHeadroom = type(uint128).max - _results.totalAsset.amount;
                 _results.interestEarned = maxBorrowHeadroom < maxAssetHeadroom
                     ? maxBorrowHeadroom
                     : maxAssetHeadroom;
-                if (_results.interestEarned == 0) {
-                    revert('interest overflow: protocol requires intervention');
-                }
             }
 
             // Accrue interest (if any) and fees iff no overflow
@@ -1134,8 +1136,21 @@ abstract contract LightlendPairCore is
                 : (_liquidationAmountInCollateralUnits * (LIQ_PRECISION + dirtyLiquidationFee)) /
                     LIQ_PRECISION;
 
-            if (protocolLiquidationFee > 0) {
-                _feesAmount = (protocolLiquidationFee * _collateralForLiquidator) / LIQ_PRECISION;
+            // ISO-01: the protocol takes its share of the bonus only, i.e. of the collateral seized beyond
+            // the value of the debt repaid. No bonus (e.g. an underwater clean liquidation) means no fee.
+            // The >= 2% net-bonus rule (LightlendPairValidation.validateLiquidationFees) bounds the fee
+            // parameters only. The realized net bonus is lower when the clean path takes all remaining
+            // collateral because it cannot cover the repaid principal plus the full clean bonus, even
+            // with positive equity (e.g. 0.9 WETH debt at $3,300 against
+            // 3,000 USDC: 0.91% net, no write-off), and can be lower on dust amounts through rounding.
+            if (
+                protocolLiquidationFee > 0 &&
+                _collateralForLiquidator > _liquidationAmountInCollateralUnits
+            ) {
+                _feesAmount =
+                    (protocolLiquidationFee *
+                        (_collateralForLiquidator - _liquidationAmountInCollateralUnits)) /
+                    LIQ_PRECISION;
                 _collateralForLiquidator = _collateralForLiquidator - _feesAmount;
             }
         }

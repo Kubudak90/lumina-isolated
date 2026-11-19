@@ -206,9 +206,12 @@ async function main() {
         maxOracleDeviation: "5000",         // 5%
         interestRateAddress: interestRate.target,
         fullUtilizationRate: "3189000000",  // ~10% starting APR
-        maxLTV: "80000",                    // 80%
-        cleanLiquidationFee: "10000",       // 10%
-        protocolLiquidationFee: "10000",    // 10%
+        // Spec §3.1. maxLTV * (1 + clean fee) = 78.75% <= 98% (ISO-05). The protocol fee is a share of
+        // the liquidation bonus only (ISO-01): dirty liquidation (4.5% bonus) nets the liquidator 4.05%,
+        // clean liquidation (5% bonus) nets 4.5%, both >= the 2% minimum the pair enforces.
+        maxLTV: "75000",                    // 75%
+        cleanLiquidationFee: "5000",        // 5% bonus on a full (clean) liquidation; dirty = 90% of it = 4.5%
+        protocolLiquidationFee: "10000",    // 10% of the liquidation bonus (not of the seized collateral)
     };
 
     const LightlendPairDeployerForPair = await ethers.getContractFactory("LightlendPairDeployer");

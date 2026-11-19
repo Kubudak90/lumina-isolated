@@ -57,14 +57,33 @@ contract VariableInterestRate is IRateCalculatorV2 {
         uint256 _maxFullUtilizationRate,
         uint256 _rateHalfLife
     ) {
-        // Validate constructor parameters
+        // Validate constructor parameters (ISO-04). Together with getNewRate() clamping utilization to
+        // UTIL_PREC and getFullUtilizationInterest() clamping in uint256 before its uint64 cast, these
+        // keep getNewRate() free of division by zero, underflow and overflow for every utilization,
+        // every _deltaTime < 2^64 and every uint64 _fullUtilizationInterest, and make every uint64
+        // cast exact, so the pair's _addInterest() (run by pause(), repay, liquidate, ...) cannot be
+        // bricked by the rate:
+        //  - maxUtil < UTIL_PREC: getFullUtilizationInterest divides by (UTIL_PREC - MAX_TARGET_UTIL).
+        //  - 0 < vertexUtilization < UTIL_PREC: getNewRate divides by VERTEX_UTILIZATION and by
+        //    (UTIL_PREC - VERTEX_UTILIZATION); vertex == 100% divided by zero at full utilization.
+        //  - vertexRatePercentOfDelta <= RATE_PREC: keeps the vertex rate <= the full-utilization rate,
+        //    otherwise (_newFullUtilizationInterest - _vertexInterest) underflows at/above the vertex,
+        //    and keeps every per-second rate <= the full-utilization rate (so its uint64 cast is exact).
+        //  - zero <= minFull <= maxFull <= type(uint64).max: the clamped full rate fits uint64 and is
+        //    never below ZERO_UTIL_RATE, so (_new - ZERO_UTIL_RATE) is safe.
+        //  - 0 < rateHalfLife <= type(uint64).max: non-zero divisor; bounds
+        //    _fullUtilizationInterest * (RATE_HALF_LIFE * 1e36 + 1e36 * _deltaTime) below 2^256.
+        // The old `_zeroUtilizationRate <= _vertexRatePercentOfDelta` check compared a per-second rate
+        // with a 1e18 percentage, so it guarded nothing and is removed.
         require(_minUtil <= _maxUtil, "min > max target util");
-        require(_maxUtil <= UTIL_PREC, "target util > 100%");
+        require(_maxUtil < UTIL_PREC, "target util >= 100%");
         require(_vertexUtilization > 0, "vertex util is 0");
-        require(_vertexUtilization <= UTIL_PREC, "vertex util > 100%");
+        require(_vertexUtilization < UTIL_PREC, "vertex util >= 100%");
+        require(_vertexRatePercentOfDelta <= RATE_PREC, "vertex rate percent > 100%");
         require(_minFullUtilizationRate <= _maxFullUtilizationRate, "min > max full util rate");
+        require(_maxFullUtilizationRate <= type(uint64).max, "max full util rate > uint64");
         require(_rateHalfLife > 0, "rate half life is 0");
-        require(_zeroUtilizationRate <= _vertexRatePercentOfDelta, "zero > vertex rate");
+        require(_rateHalfLife <= type(uint64).max, "rate half life > uint64");
         require(_zeroUtilizationRate <= _minFullUtilizationRate, "zero rate > min full util");
 
         suffix = _suffix;
@@ -106,6 +125,10 @@ contract VariableInterestRate is IRateCalculatorV2 {
         uint256 _utilization,
         uint64 _fullUtilizationInterest
     ) internal view returns (uint64 _newFullUtilizationInterest) {
+        // ISO-04: computed and clamped in uint256, cast to uint64 only after the clamp. Casting first
+        // wrapped values >= 2^64 (e.g. growth from a high full-utilization rate) to a small number that
+        // the clamp then raised to MIN_FULL_UTIL_RATE instead of MAX_FULL_UTIL_RATE.
+        uint256 _newRate;
         if (_utilization < MIN_TARGET_UTIL) {
             // 18 decimals
             uint256 _deltaUtilization = ((MIN_TARGET_UTIL - _utilization) * 1e18) / MIN_TARGET_UTIL;
@@ -113,9 +136,7 @@ contract VariableInterestRate is IRateCalculatorV2 {
             uint256 _decayGrowth = (RATE_HALF_LIFE * 1e36) +
                 (_deltaUtilization * _deltaUtilization * _deltaTime);
             // 18 decimals
-            _newFullUtilizationInterest = uint64(
-                (_fullUtilizationInterest * (RATE_HALF_LIFE * 1e36)) / _decayGrowth
-            );
+            _newRate = (_fullUtilizationInterest * (RATE_HALF_LIFE * 1e36)) / _decayGrowth;
         } else if (_utilization > MAX_TARGET_UTIL) {
             // 18 decimals
             uint256 _deltaUtilization = ((_utilization - MAX_TARGET_UTIL) * 1e18) /
@@ -124,17 +145,17 @@ contract VariableInterestRate is IRateCalculatorV2 {
             uint256 _decayGrowth = (RATE_HALF_LIFE * 1e36) +
                 (_deltaUtilization * _deltaUtilization * _deltaTime);
             // 18 decimals
-            _newFullUtilizationInterest = uint64(
-                (_fullUtilizationInterest * _decayGrowth) / (RATE_HALF_LIFE * 1e36)
-            );
+            _newRate = (_fullUtilizationInterest * _decayGrowth) / (RATE_HALF_LIFE * 1e36);
         } else {
-            _newFullUtilizationInterest = _fullUtilizationInterest;
+            _newRate = _fullUtilizationInterest;
         }
-        if (_newFullUtilizationInterest > MAX_FULL_UTIL_RATE) {
-            _newFullUtilizationInterest = uint64(MAX_FULL_UTIL_RATE);
-        } else if (_newFullUtilizationInterest < MIN_FULL_UTIL_RATE) {
-            _newFullUtilizationInterest = uint64(MIN_FULL_UTIL_RATE);
+        if (_newRate > MAX_FULL_UTIL_RATE) {
+            _newRate = MAX_FULL_UTIL_RATE;
+        } else if (_newRate < MIN_FULL_UTIL_RATE) {
+            _newRate = MIN_FULL_UTIL_RATE;
         }
+        // Exact: _newRate <= MAX_FULL_UTIL_RATE <= type(uint64).max (constructor)
+        _newFullUtilizationInterest = uint64(_newRate);
     }
 
     /// @notice The ```getNewRate``` function calculates interest rates using two linear functions f(utilization)
@@ -148,6 +169,10 @@ contract VariableInterestRate is IRateCalculatorV2 {
         uint256 _utilization,
         uint64 _oldFullUtilizationInterest
     ) external view returns (uint64 _newRatePerSec, uint64 _newFullUtilizationInterest) {
+        // ISO-04 defence in depth: the pair keeps utilization <= 100%, but an over-100% value must never
+        // reach the squared delta in getFullUtilizationInterest or the uint64 casts below.
+        if (_utilization > UTIL_PREC) _utilization = UTIL_PREC;
+
         _newFullUtilizationInterest = getFullUtilizationInterest(
             _deltaTime,
             _utilization,
