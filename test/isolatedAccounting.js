@@ -949,6 +949,8 @@ describe("S5b round 1: Codex review fixes", function () {
             const { core, pair, pair2, cb, tl } = await loadFixture(fxTwoPairs);
             const deployer = core.lightlendPairDeployer;
             await pair2.connect(tl).revokeBorrowLimitAccessControl(ethers.MaxUint256);
+            // generic first (the old code did not revert at all), then the specific error
+            await expect(deployer.connect(cb).globalPause([pair.target, pair2.target])).to.be.reverted;
             await expect(deployer.connect(cb).globalPause([pair.target, pair2.target]))
                 .to.be.revertedWithCustomError(deployer, "PairNotPaused")
                 .withArgs(pair2.target);
@@ -957,6 +959,7 @@ describe("S5b round 1: Codex review fixes", function () {
 
             const { pair: pair3 } = await loadFixture(fxTwoPairs);
             await pair3.connect(tl).revokeInterestAccessControl();
+            await expect(deployer.connect(cb).globalPause([pair3.target])).to.be.reverted;
             await expect(deployer.connect(cb).globalPause([pair3.target]))
                 .to.be.revertedWithCustomError(deployer, "PairNotPaused")
                 .withArgs(pair3.target);
@@ -968,6 +971,7 @@ describe("S5b round 1: Codex review fixes", function () {
             const stop = await deployRaw("00"); // succeeds with empty return data
             const zeroWord = await deployRaw("60206000f3"); // succeeds returning 32 zero bytes
             await expect(deployer.connect(cb).globalPause([pair.target, stop])).to.be.reverted;
+            await expect(deployer.connect(cb).globalPause([pair.target, zeroWord])).to.be.reverted;
             await expect(deployer.connect(cb).globalPause([pair.target, zeroWord]))
                 .to.be.revertedWithCustomError(deployer, "PairNotPaused")
                 .withArgs(zeroWord);
