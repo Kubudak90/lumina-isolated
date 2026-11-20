@@ -390,10 +390,14 @@ abstract contract LightlendPairCore is
             // (asset wei x RATE_PRECISION) includes the remainder left by the previous accrual, and the
             // part that does not make a whole wei is stored for the next one (< RATE_PRECISION, so the
             // carry adds at most 1 wei to any single accrual). With 1-second blocks this removes the
-            // truncation loss of per-block accrual; compounding still makes N one-second accruals
-            // slightly larger than one N-second accrual. lastTimestamp still advances on every accrual,
-            // including when the interest is 0, so idle time is never charged to principal borrowed
-            // later (R1-3).
+            // truncation loss of per-block accrual. At a fixed rate with enough uint128 headroom,
+            // compounding still makes N one-second accruals slightly larger than one N-second accrual.
+            // With a time-dependent rate (VariableInterestRate's adaptive full-utilization rate) the
+            // split can accrue less instead, because each update uses the rate at its own start: at 100%
+            // utilization, 1e18 debt, a 2 s half-life and a 1e9 starting rate, two 1 s accruals earn
+            // 3,750,000,003 wei and one 2 s accrual 4,000,000,000 wei. lastTimestamp still advances on
+            // every accrual, including when the interest is 0, so idle time is never charged to
+            // principal borrowed later (R1-3).
             uint256 _numerator = _deltaTime *
                 _results.totalBorrow.amount *
                 _results.newRate +
@@ -996,6 +1000,11 @@ abstract contract LightlendPairCore is
         uint256 shares
     );
 
+    /// @notice The ```WriteOffResidualDebt``` event is emitted when the last borrow share is burned and the
+    /// remaining debt, which no share represents (virtual-share rounding), is written off against lenders
+    /// @param amount The debt removed from totalBorrow and totalAsset
+    event WriteOffResidualDebt(uint256 amount);
+
     /// @notice The ```_repayAsset``` function is the internal implementation for repaying a borrow position
     /// @dev The payer must have called ERC20.approve() on the Asset Token contract prior to invocation
     /// @param _totalBorrow An in memory copy of the totalBorrow VaultAccount struct
@@ -1020,6 +1029,7 @@ abstract contract LightlendPairCore is
         // interest credited to totalAsset. Covers full repayment and every liquidation path; the
         // clean-path write-off in liquidate() has already been taken out of both totals.
         if (_totalBorrow.shares == 0 && _totalBorrow.amount > 0) {
+            emit WriteOffResidualDebt(_totalBorrow.amount);
             totalAsset.amount -= _totalBorrow.amount;
             _totalBorrow.amount = 0;
         }

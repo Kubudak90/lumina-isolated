@@ -618,15 +618,21 @@ describe("S5b: isolated accounting", function () {
         it("a pair whose pause() fails makes globalPause revert, and nothing is paused", async function () {
             const { core, pair, pair2, cb } = await loadFixture(fxTwoPairs);
             const deployer = core.lightlendPairDeployer;
-            const foreign = await deployForeignPair();
-            await expect(deployer.connect(cb).globalPause([pair.target, foreign.target, pair2.target])).to.be.revertedWithCustomError(
-                foreign,
-                "OnlyProtocolOrOwner"
-            );
-            // an address that is not a pair (no code) reverts too
-            await expect(deployer.connect(cb).globalPause([pair.target, ethers.Wallet.createRandom().address])).to.be.reverted;
+            // a recorded pair whose pause() reverts: its rate contract has no code, so _addInterest() reverts
+            const tl = await impersonate(core.timelock.target);
+            await pair2.connect(tl).setRateContract(ethers.Wallet.createRandom().address);
+            await expect(deployer.connect(cb).globalPause([pair.target, pair2.target])).to.be.reverted;
             await expectNotPaused(pair);
-            await expectNotPaused(pair2);
+            // another deployer's pair, and an address with no code, are rejected before pause() is called
+            const foreign = await deployForeignPair();
+            await expect(deployer.connect(cb).globalPause([pair.target, foreign.target]))
+                .to.be.revertedWithCustomError(deployer, "NotDeployedPair")
+                .withArgs(foreign.target);
+            const noCode = ethers.Wallet.createRandom().address;
+            await expect(deployer.connect(cb).globalPause([pair.target, noCode]))
+                .to.be.revertedWithCustomError(deployer, "NotDeployedPair")
+                .withArgs(noCode);
+            await expectNotPaused(pair);
             await expectNotPaused(foreign);
         });
 
@@ -798,6 +804,12 @@ async function expectNoDebtAndNoLaterInterest(pair) {
     expect(va(await pair.totalAsset())).to.deep.equal(ta);
 }
 
+/// Amount logged by WriteOffResidualDebt in a receipt (0 if not emitted).
+function residualWrittenOff(pair, rc) {
+    const ev = parseEvent(pair, rc, "WriteOffResidualDebt");
+    return ev ? ev.args.amount : 0n;
+}
+
 /// Flat-rate interest the next accrual at `ts` adds, with the S5b carry.
 async function nextInterest(pair, ts, rate) {
     const info = await pair.currentRateInfo();
@@ -832,6 +844,7 @@ describe("S5b round 1: Codex review fixes", function () {
             await pair.updateExchangeRate();
             expect((await pair.exchangeRateInfo())[4]).to.equal(2n * E18);
             const ta0 = va(await pair.totalAsset());
+            const tb0 = va(await pair.totalBorrow());
             const r = await (await pair.connect(liquidator).liquidate(500n, (await time.latest()) + 3600, borrower.address)).wait();
             const ev = parseEvent(pair, r, "Liquidate");
             // L = toAmount(500) * 2 = 750 * 2 = 1,500 >= collateral / 1.1 -> clean path, all 1,500 collateral
@@ -847,6 +860,11 @@ describe("S5b round 1: Codex review fixes", function () {
             const ta1 = va(await pair.totalAsset());
             expect(ta0.amount - ta1.amount).to.equal(1_250n);
             expect(ta1.shares).to.equal(ta0.shares);
+            // round 2: the residue is logged, so the logs reconcile with the debt removed and the lenders' loss
+            const residual = residualWrittenOff(pair, r);
+            expect(residual).to.equal(500n);
+            expect(ev.args._amountLiquidatorToRepay + ev.args._amountToAdjust + residual).to.equal(tb0.amount - tb1.amount);
+            expect(ev.args._amountToAdjust + residual).to.equal(ta0.amount - ta1.amount);
             expect(await pair.userBorrowShares(borrower.address)).to.equal(0n);
             expect(await pair.userCollateralBalance(borrower.address)).to.equal(0n);
             await pair.connect(tl).setRateContract(rc.hi.target);
@@ -874,9 +892,14 @@ describe("S5b round 1: Codex review fixes", function () {
             expect(residue).to.be.gt(0n); // ~1e3 x (share price - 1) = ~100 wei
             const bal0 = await weth.balanceOf(borrower.address);
             await time.setNextBlockTimestamp(ts);
-            await pair.connect(borrower).repayAsset(shares, borrower.address);
+            const r = await (await pair.connect(borrower).repayAsset(shares, borrower.address)).wait();
             const tbAfter = va(await pair.totalBorrow());
             console.log(`      residue ${residue} wei; after full repay totalBorrow (${tbAfter.amount}, ${tbAfter.shares})`);
+            // round 2: debt before + interest - repaid - logged residue = debt after (0)
+            expect(residualWrittenOff(pair, r)).to.equal(residue);
+            const added = parseEvent(pair, r, "AddInterest").args.interestEarned;
+            const repaid = parseEvent(pair, r, "RepayAsset").args.amountToRepay;
+            expect(tb.amount + added - repaid - residualWrittenOff(pair, r)).to.equal(tbAfter.amount);
             expect(bal0 - (await weth.balanceOf(borrower.address))).to.equal(repay);
             expect(tbAfter).to.deep.equal({ amount: 0n, shares: 0n });
             expect((await pair.totalAsset())[0]).to.equal(ta.amount + I - residue);
@@ -925,6 +948,12 @@ describe("S5b round 1: Codex review fixes", function () {
             console.log(`      residue ${residue} wei; after the dirty liquidation totalBorrow (${tbAfter.amount}, ${tbAfter.shares})`);
             expect(tbAfter).to.deep.equal({ amount: 0n, shares: 0n });
             expect((await pair.totalAsset())[0]).to.equal(ta.amount + I - residue);
+            // round 2: debt before + interest - repaid by the liquidator - logged residue = debt after (0)
+            expect(residualWrittenOff(pair, r)).to.equal(residue);
+            const added = parseEvent(pair, r, "AddInterest").args.interestEarned;
+            expect(tb.amount + added - ev.args._amountLiquidatorToRepay - ev.args._amountToAdjust - residualWrittenOff(pair, r)).to.equal(
+                tbAfter.amount
+            );
             await expectNoDebtAndNoLaterInterest(pair);
         });
     });
@@ -970,12 +999,71 @@ describe("S5b round 1: Codex review fixes", function () {
             const deployer = core.lightlendPairDeployer;
             const stop = await deployRaw("00"); // succeeds with empty return data
             const zeroWord = await deployRaw("60206000f3"); // succeeds returning 32 zero bytes
-            await expect(deployer.connect(cb).globalPause([pair.target, stop])).to.be.reverted;
-            await expect(deployer.connect(cb).globalPause([pair.target, zeroWord])).to.be.reverted;
-            await expect(deployer.connect(cb).globalPause([pair.target, zeroWord]))
-                .to.be.revertedWithCustomError(deployer, "PairNotPaused")
-                .withArgs(zeroWord);
+            for (const fake of [stop, zeroWord]) {
+                await expect(deployer.connect(cb).globalPause([pair.target, fake])).to.be.reverted;
+                // round 2: rejected by identity before pause() is called
+                await expect(deployer.connect(cb).globalPause([pair.target, fake]))
+                    .to.be.revertedWithCustomError(deployer, "NotDeployedPair")
+                    .withArgs(fake);
+            }
             expect(await pair.isWithdrawPaused()).to.equal(false);
+        });
+
+        /// Round 2: a status-only look-alike. borrowLimit() and depositLimit() return 0, every other call
+        /// (isWithdrawPaused, isInterestPaused, and a no-op pause()) returns the word 1.
+        async function deployFakePair() {
+            const sel = (sig) => ethers.id(sig).slice(2, 10);
+            const runtime =
+                "600035" + "60e01c" + // selector
+                "80" + "63" + sel("borrowLimit()") + "14" + "6023" + "57" + // -> return 0
+                "63" + sel("depositLimit()") + "14" + "6023" + "57" + // -> return 0
+                "6001600052" + "60206000f3" + // return 1
+                "5b" + "60206000f3"; // 0x23: return 0
+            const fake = await deployRaw(runtime);
+            const asPair = (await ethers.getContractFactory("LightlendPair")).attach(fake);
+            expect(await asPair.borrowLimit()).to.equal(0n);
+            expect(await asPair.depositLimit()).to.equal(0n);
+            expect(await asPair.isWithdrawPaused()).to.equal(true);
+            expect(await asPair.isInterestPaused()).to.equal(true);
+            await asPair.pause.staticCall(); // succeeds and does nothing
+            return fake;
+        }
+
+        it("a fake pair-like contract (zero limits, pause flags set, no-op pause) makes globalPause revert NotDeployedPair", async function () {
+            const { core, cb } = await loadFixture(fxTwoPairs);
+            const deployer = core.lightlendPairDeployer;
+            const fake = await deployFakePair();
+            expect(await deployer.isDeployedPair(fake)).to.equal(false);
+            await expect(deployer.connect(cb).globalPause([fake])).to.be.reverted; // r1 code: passed the read-backs
+            await expect(deployer.connect(cb).globalPause([fake]))
+                .to.be.revertedWithCustomError(deployer, "NotDeployedPair")
+                .withArgs(fake);
+        });
+
+        it("a batch with one real pair and one fake reverts as a whole", async function () {
+            const { core, pair, cb } = await loadFixture(fxTwoPairs);
+            const deployer = core.lightlendPairDeployer;
+            const fake = await deployFakePair();
+            await expect(deployer.connect(cb).globalPause([pair.target, fake])).to.be.reverted;
+            await expect(deployer.connect(cb).globalPause([pair.target, fake]))
+                .to.be.revertedWithCustomError(deployer, "NotDeployedPair")
+                .withArgs(fake);
+            expect(await pair.isWithdrawPaused()).to.equal(false); // the real pair's pause() was rolled back
+            expect(await pair.borrowLimit()).to.equal(ethers.MaxUint256);
+        });
+
+        it("genuine pairs are recorded by the deployer and still pause", async function () {
+            const { core, pair, pair2, cb } = await loadFixture(fxTwoPairs);
+            const deployer = core.lightlendPairDeployer;
+            expect(await deployer.isDeployedPair(pair.target)).to.equal(true);
+            expect(await deployer.isDeployedPair(pair2.target)).to.equal(true);
+            await deployer.connect(cb).globalPause([pair.target, pair2.target]);
+            for (const p of [pair, pair2]) {
+                expect(await p.borrowLimit()).to.equal(0n);
+                expect(await p.depositLimit()).to.equal(0n);
+                expect(await p.isWithdrawPaused()).to.equal(true);
+                expect(await p.isInterestPaused()).to.equal(true);
+            }
         });
     });
 
