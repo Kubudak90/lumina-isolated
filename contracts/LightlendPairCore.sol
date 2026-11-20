@@ -109,21 +109,14 @@ abstract contract LightlendPairCore is
 
     // NOTE: user shares of assets are represented as ERC-20 tokens and accessible via balanceOf()
 
-    // Bad debt cap: max 5% of total assets can be written off per liquidation
-    uint256 public constant MAX_BAD_DEBT_BPS = 500;
-
     /// @notice Maximum allowed age for exchange rate before borrowing is disabled
     uint256 public constant MAX_EXCHANGE_RATE_AGE = 1 hours;
 
-    /// @notice Cumulative bad debt written off during the current epoch
-    uint128 public cumulativeBadDebtWriteOff;
-    /// @notice Timestamp when the current bad debt epoch started
-    uint256 public badDebtEpochStart;
-    /// @notice Duration of each bad debt epoch (resets cumulative tracker)
-    uint256 public constant BAD_DEBT_EPOCH_DURATION = 1 days;
-
-    /// @notice Emitted when bad debt is written off during liquidation
-    event BadDebtWriteOff(uint256 amount, uint256 remainingTotalAssets);
+    /// @notice Truncated interest numerator carried to the next accrual (ISO-09 remainder carry)
+    /// @dev Units: asset wei x RATE_PRECISION. Always < RATE_PRECISION, i.e. worth less than 1 wei of
+    ///      interest. Frozen (neither consumed nor reset) while interest is paused; reset to 0 when the
+    ///      uint128 accounting ceiling caps or skips a whole-wei accrual. See _calculateInterest.
+    uint256 public interestRemainder;
 
     /// @notice Emitted when interest accrual would overflow uint128
     event InterestAccrualOverflow(uint256 interestEarned, uint128 totalBorrowAmount);
@@ -361,6 +354,7 @@ abstract contract LightlendPairCore is
         uint256 interestEarned;
         uint256 feesAmount;
         uint256 feesShare;
+        uint256 interestRemainder;
         VaultAccount totalAsset;
         VaultAccount totalBorrow;
     }
@@ -392,10 +386,24 @@ abstract contract LightlendPairCore is
             (_results.newRate, _results.newFullUtilizationRate) = IRateCalculatorV2(rateContract)
                 .getNewRate(_deltaTime, _utilizationRate, _currentRateInfo.fullUtilizationRate);
 
-            // Calculate interest accrued
-            _results.interestEarned =
-                (_deltaTime * _results.totalBorrow.amount * _results.newRate) /
-                RATE_PRECISION;
+            // Calculate interest accrued, carrying the truncated remainder (ISO-09). The numerator
+            // (asset wei x RATE_PRECISION) includes the remainder left by the previous accrual, and the
+            // part that does not make a whole wei is stored for the next one (< RATE_PRECISION, so the
+            // carry adds at most 1 wei to any single accrual). With 1-second blocks this removes the
+            // truncation loss of per-block accrual. At a fixed rate with enough uint128 headroom,
+            // compounding still makes N one-second accruals slightly larger than one N-second accrual.
+            // With a time-dependent rate (VariableInterestRate's adaptive full-utilization rate) the
+            // split can accrue less instead, because each update uses the rate at its own start: at 100%
+            // utilization, 1e18 debt, a 2 s half-life and a 1e9 starting rate, two 1 s accruals earn
+            // 3,750,000,003 wei and one 2 s accrual 4,000,000,000 wei. lastTimestamp still advances on
+            // every accrual, including when the interest is 0, so idle time is never charged to
+            // principal borrowed later (R1-3).
+            uint256 _numerator = _deltaTime *
+                _results.totalBorrow.amount *
+                _results.newRate +
+                interestRemainder;
+            _results.interestEarned = _numerator / RATE_PRECISION;
+            _results.interestRemainder = _numerator % RATE_PRECISION;
 
             // Check for overflow
             if (
@@ -413,6 +421,10 @@ abstract contract LightlendPairCore is
                 _results.interestEarned = maxBorrowHeadroom < maxAssetHeadroom
                     ? maxBorrowHeadroom
                     : maxAssetHeadroom;
+                // Interest that does not fit is forfeited, and so is its sub-wei remainder: the carry
+                // resets to 0 whenever the ceiling caps or skips a whole-wei accrual. A sub-wei
+                // remainder from a zero-wei accrual at the ceiling is still carried (worth < 1 wei).
+                _results.interestRemainder = 0;
             }
 
             // Accrue interest (if any) and fees iff no overflow
@@ -421,17 +433,21 @@ abstract contract LightlendPairCore is
                 _results.totalBorrow.amount += uint128(_results.interestEarned);
                 _results.totalAsset.amount += uint128(_results.interestEarned);
                 if (_currentRateInfo.feeToProtocolRate > 0) {
-                    _results.feesAmount =
-                        (_results.interestEarned * _currentRateInfo.feeToProtocolRate) /
-                        FEE_PRECISION;
+                    uint256 _feesAmount = (_results.interestEarned *
+                        _currentRateInfo.feeToProtocolRate) / FEE_PRECISION;
+                    uint256 _feesShare = (_feesAmount * _results.totalAsset.shares) /
+                        (_results.totalAsset.amount - _feesAmount);
 
-                    _results.feesShare =
-                        (_results.feesAmount * _results.totalAsset.shares) /
-                        (_results.totalAsset.amount - _results.feesAmount);
-
-                    // Effects: Give new shares to this contract, effectively diluting lenders an amount equal to the fees
-                    // We can safely cast because _feesShare < _feesAmount < interestEarned which is always less than uint128
-                    _results.totalAsset.shares += uint128(_results.feesShare);
+                    // Effects: Give new shares to this contract, effectively diluting lenders an amount equal to the fees.
+                    // Like the interest cap above, this must never revert or truncate: after a write-off the
+                    // share price is below 1, so near the uint128 ceiling the fee shares may not fit in
+                    // totalAsset.shares. In that case the protocol fee is skipped for this accrual (all of the
+                    // interest goes to lenders); it is charged normally on later accruals once it fits.
+                    if (_feesShare <= type(uint128).max - _results.totalAsset.shares) {
+                        _results.feesAmount = _feesAmount;
+                        _results.feesShare = _feesShare;
+                        _results.totalAsset.shares += uint128(_feesShare);
+                    }
                 }
             }
         }
@@ -484,6 +500,7 @@ abstract contract LightlendPairCore is
 
             // Effects: write to state
             currentRateInfo = _currentRateInfo;
+            interestRemainder = _results.interestRemainder;
             totalAsset = _results.totalAsset;
             totalBorrow = _results.totalBorrow;
             if (_feesShare > 0) _mint(address(this), _feesShare);
@@ -983,6 +1000,11 @@ abstract contract LightlendPairCore is
         uint256 shares
     );
 
+    /// @notice The ```WriteOffResidualDebt``` event is emitted when the last borrow share is burned and the
+    /// remaining debt, which no share represents (virtual-share rounding), is written off against lenders
+    /// @param amount The debt removed from totalBorrow and totalAsset
+    event WriteOffResidualDebt(uint256 amount);
+
     /// @notice The ```_repayAsset``` function is the internal implementation for repaying a borrow position
     /// @dev The payer must have called ERC20.approve() on the Asset Token contract prior to invocation
     /// @param _totalBorrow An in memory copy of the totalBorrow VaultAccount struct
@@ -1000,6 +1022,17 @@ abstract contract LightlendPairCore is
         // Effects: Bookkeeping
         _totalBorrow.amount -= _amountToRepay;
         _totalBorrow.shares -= _shares;
+
+        // The virtual-share offset makes the burned shares convert to slightly less than the recorded
+        // debt (about 1e3 x (share price - 1) units in total). Once the last borrow share is gone that
+        // residue is owed by nobody, so write it off against lenders here instead of letting it accrue
+        // interest credited to totalAsset. Covers full repayment and every liquidation path; the
+        // clean-path write-off in liquidate() has already been taken out of both totals.
+        if (_totalBorrow.shares == 0 && _totalBorrow.amount > 0) {
+            emit WriteOffResidualDebt(_totalBorrow.amount);
+            totalAsset.amount -= _totalBorrow.amount;
+            _totalBorrow.amount = 0;
+        }
 
         // Effects: write to state
         userBorrowShares[_borrower] -= _shares;
@@ -1092,12 +1125,6 @@ abstract contract LightlendPairCore is
         // Update exchange rate and use the lower rate for liquidations
         (, uint256 _exchangeRate, ) = _updateExchangeRate();
 
-        // Reset bad debt epoch at the start, atomically before any calculations
-        if (block.timestamp >= badDebtEpochStart + BAD_DEBT_EPOCH_DURATION) {
-            badDebtEpochStart = block.timestamp;
-            cumulativeBadDebtWriteOff = 0;
-        }
-
         // Check if borrower is solvent, revert if they are
         if (_isSolvent(_borrower, _exchangeRate)) {
             revert BorrowerSolvent();
@@ -1164,42 +1191,20 @@ abstract contract LightlendPairCore is
         {
             uint128 _amountToAdjust = 0;
             if (_leftoverCollateral <= 0) {
-                // Determine if we need to adjust any shares
+                // ISO-02: the clean path takes all of the borrower's collateral, so every borrow share
+                // the liquidator does not repay is written off in this transaction (upstream FraxLend).
+                // The loss is socialized at once across all lenders through totalAsset, and the
+                // written-off debt leaves totalBorrow, so it stops accruing interest.
                 _sharesToAdjust = _borrowerShares - _sharesToLiquidate;
                 if (_sharesToAdjust > 0) {
                     // Write off bad debt
                     _amountToAdjust = (_totalBorrow.toAmount(_sharesToAdjust, false)).toUint128();
 
-                    // Cap per-liquidation
-                    uint256 _maxWriteOff = (totalAsset.amount * MAX_BAD_DEBT_BPS) / 10000;
-                    if (_amountToAdjust > _maxWriteOff) {
-                        _amountToAdjust = uint128(_maxWriteOff);
-                        _sharesToAdjust = (_totalBorrow.toShares(_amountToAdjust, false))
-                            .toUint128();
-                    }
+                    // Note: Ensure this memory struct will be passed to _repayAsset for write to state
+                    _totalBorrow.amount -= _amountToAdjust;
 
-                    // Enforce epoch-level cumulative cap
-                    uint256 _remainingEpochBudget = _maxWriteOff > cumulativeBadDebtWriteOff
-                        ? _maxWriteOff - cumulativeBadDebtWriteOff
-                        : 0;
-                    if (_amountToAdjust > _remainingEpochBudget) {
-                        _amountToAdjust = uint128(_remainingEpochBudget);
-                        _sharesToAdjust = _amountToAdjust > 0
-                            ? (_totalBorrow.toShares(_amountToAdjust, false)).toUint128()
-                            : 0;
-                    }
-
-                    // Update cumulative tracker
-                    cumulativeBadDebtWriteOff += uint128(_amountToAdjust);
-
-                    if (_amountToAdjust > 0) {
-                        // Note: Ensure this memory struct will be passed to _repayAsset for write to state
-                        _totalBorrow.amount -= _amountToAdjust;
-
-                        // Effects: write to state
-                        totalAsset.amount -= _amountToAdjust;
-                        emit BadDebtWriteOff(_amountToAdjust, totalAsset.amount);
-                    }
+                    // Effects: write to state
+                    totalAsset.amount -= _amountToAdjust;
                 }
             }
             emit Liquidate(

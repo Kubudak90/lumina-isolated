@@ -169,6 +169,14 @@ interface ILightlendPair {
 
     function paused() external view returns (bool);
 
+    function borrowLimit() external view returns (uint256);
+
+    function depositLimit() external view returns (uint256);
+
+    function isWithdrawPaused() external view returns (bool);
+
+    function isInterestPaused() external view returns (bool);
+
     function penaltyRate() external view returns (uint256);
 
     function rateContract() external view returns (address);
