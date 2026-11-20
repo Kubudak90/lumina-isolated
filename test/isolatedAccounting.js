@@ -80,7 +80,7 @@ function parseEvent(contract, rc, name) {
 
 /// Full deploy through LightlendPairDeployer: asset WETH (18 dec), collateral USDC (6 dec), WETH = $2400.
 /// rate: undefined -> review PoC VariableInterestRate; "zero" -> LinearInterestRate with all rates 0;
-/// "linear" -> LinearInterestRate 1% / 10% (vertex 80%) / 100% APR.
+/// "linear" -> LinearInterestRate 1% / 10% (vertex 80%) / 100% APR; "flat10" -> flat ~10% APR.
 async function build({
     maxLTV = "75000",
     cleanLiquidationFee = "10000",
@@ -92,6 +92,7 @@ async function build({
     let interestRate;
     if (rate === "zero") interestRate = await LIR.deploy("zero", 80000, 0, 0, 0);
     else if (rate === "linear") interestRate = await LIR.deploy("lin", 80000, R1, R10, R100);
+    else if (rate === "flat10") interestRate = await LIR.deploy("flat", 80000, R10, R10, R10);
     else ({ interestRate } = await setup.deployInterestRate(POC_RATE));
     const { mockTokens } = await setup.deployMockTokens(["USDC", "WETH"], [6, 18]);
     const usdc = mockTokens.USDC;
@@ -225,22 +226,25 @@ describe("S5b: isolated accounting", function () {
         it("nothing keeps accruing on written-off debt", async function () {
             const ctx = await loadFixture(fxPocB);
             const { pair, lenderB } = ctx;
+            // a year of interest first, so the borrow share price is well above 1 and the virtual-share
+            // offset would leave a residue once the last share is burned
+            await time.increase(365 * DAY);
             await pocBLiquidate(ctx);
             const tb0 = va(await pair.totalBorrow());
             const bValue0 = await pair.toAssetAmount(await pair.balanceOf(lenderB.address), false, false);
 
             await time.increase(365 * DAY);
-            await pair.addInterest(false);
+            const rc = await (await pair.addInterest(false)).wait();
 
             const tb1 = va(await pair.totalBorrow());
             const bValue1 = await pair.toAssetAmount(await pair.balanceOf(lenderB.address), false, false);
             console.log(`      one year after the liquidation: totalBorrow ${tb0.amount} -> ${tb1.amount} wei`);
-            // a year of interest on <= 1000 wei of dust: at most a few wei (the old code accrued on ~0.69 WETH)
-            expect(tb1.amount - tb0.amount).to.be.lte(10n);
-            expect(bValue1 - bValue0).to.be.lte(10n); // lenders' shares are not inflated by phantom interest
-            // only the virtual-share rounding dust (~1e3 x (share price - 1) wei) is left, with no shares
+            expect(parseEvent(pair, rc, "AddInterest").args.interestEarned).to.equal(0n);
+            expect(tb1.amount).to.equal(0n);
+            expect(bValue1).to.equal(bValue0); // lenders' shares are not inflated by phantom interest
+            // no debt is left at all: no shares and no residue
             expect(tb0.shares).to.equal(0n);
-            expect(tb0.amount).to.be.lte(1000n);
+            expect(tb0.amount).to.equal(0n);
         });
 
         it("exact totalBorrow / totalAsset deltas: every remaining share is written off in the same transaction", async function () {
@@ -718,6 +722,357 @@ describe("S5b: isolated accounting", function () {
             }
             expect(await pair.userBorrowShares(borrower.address)).to.equal(shares0);
             expect(await pair.userCollateralBalance(borrower.address)).to.equal(coll0);
+        });
+    });
+});
+
+// =================================================================================================
+// Round 1 (Codex review of d35f8ad): A no debt left once the last borrow share is burned,
+// B globalPause verifies every pair really is paused, C fee shares never revert or truncate at the
+// uint128 ceiling.
+// =================================================================================================
+
+/// Deploys a raw contract whose runtime code is `runtimeHex` (< 256 bytes): a "non-pair" whose every call
+/// succeeds. "00" = STOP (empty return data); "60206000f3" = returns one zero word.
+async function deployRaw(runtimeHex) {
+    const [signer] = await ethers.getSigners();
+    const rt = runtimeHex.replace(/^0x/, "");
+    const len = (rt.length / 2).toString(16).padStart(2, "0");
+    const init = `0x60${len}600c60003960${len}6000f3${rt}`;
+    const rc = await (await signer.sendTransaction({ data: init })).wait();
+    expect(await ethers.provider.getCode(rc.contractAddress)).to.equal(`0x${rt}`);
+    return rc.contractAddress;
+}
+
+/// Pair with two 18-decimal tokens priced 1:1 (asset feed and collateral feed both $1) and the given
+/// flat LinearInterestRate. Extra rate contracts are deployed so the timelock can swap between them.
+async function buildRaw({ rates, maxLTV = "75000", cleanLiquidationFee = "10000", protocolLiquidationFee = "1000" }) {
+    const core = await setup.deployCore();
+    const LIR = await ethers.getContractFactory("LinearInterestRate");
+    const rc = {};
+    for (const [k, r] of Object.entries(rates)) rc[k] = await LIR.deploy(k, 80000, r, r, r);
+    const { mockTokens } = await setup.deployMockTokens(["AST", "COL"], [18, 18]);
+    const ast = mockTokens.AST;
+    const col = mockTokens.COL;
+    const astFeed = await setup.deployMockChainlinkOracle((10n ** 8n).toString());
+    const colFeed = await setup.deployMockChainlinkOracle((10n ** 8n).toString());
+    const { oracle } = await setup.deployOracle({
+        baseToken: ast.target,
+        quoteToken: col.target,
+        chainlinkMultiplyAddress: astFeed.target,
+        chainlinkDivideAddress: colFeed.target,
+        maxOracleDelay: "1000000",
+        timelockAddress: core.timelock.target,
+        name: "raw",
+    });
+    await ast.mint(core.lightlendPairDeployer.target, weth18("1"));
+    const pair = (await ethers.getContractFactory("LightlendPair")).attach(
+        await setup.deployPair({
+            lightlendPairRegistry: core.lightlendPairRegistry.target,
+            lightlendPairDeployerAddress: core.lightlendPairDeployer.target,
+            assetTokenAddress: ast.target,
+            collateralTokenAddress: col.target,
+            interestRateAddress: rc[Object.keys(rates)[0]].target,
+            oracleAddress: oracle.target,
+            maxOracleDeviation: "5000",
+            fullUtilizationRate: "9500000000",
+            maxLTV,
+            cleanLiquidationFee,
+            protocolLiquidationFee,
+        })
+    );
+    const signers = await ethers.getSigners();
+    const [, , , , lender, , borrower, liquidator, borrower2] = signers;
+    const tl = await impersonate(core.timelock.target);
+    return { core, pair, ast, col, astFeed, oracle, rc, tl, lender, borrower, liquidator, borrower2 };
+}
+
+/// One later accrual (30 days at a non-zero rate) must accrue nothing and change nothing.
+async function expectNoDebtAndNoLaterInterest(pair) {
+    expect(va(await pair.totalBorrow())).to.deep.equal({ amount: 0n, shares: 0n });
+    const ta = va(await pair.totalAsset());
+    await time.increase(30 * DAY);
+    const rc = await (await pair.addInterest(false)).wait();
+    expect(parseEvent(pair, rc, "AddInterest").args.interestEarned).to.equal(0n);
+    expect(va(await pair.totalBorrow())).to.deep.equal({ amount: 0n, shares: 0n });
+    expect(va(await pair.totalAsset())).to.deep.equal(ta);
+}
+
+/// Flat-rate interest the next accrual at `ts` adds, with the S5b carry.
+async function nextInterest(pair, ts, rate) {
+    const info = await pair.currentRateInfo();
+    const tb = va(await pair.totalBorrow());
+    return ((ts - info.lastTimestamp) * tb.amount * rate + (await pair.interestRemainder())) / E18;
+}
+
+/// Codex's case at wei scale, where the 1e3 virtual offset matters: 10,000 wei supplied; the sole
+/// borrower holds 1,000 shares and owes 2,000 wei; 1,500 wei of collateral at a 2:1 rate.
+async function fxOffsetToy() {
+    const HI = 10n ** 16n; // 100 s at this flat rate doubles the debt exactly
+    const ctx = await buildRaw({ rates: { hi: HI, zero: 0n } });
+    const { pair, ast, col, astFeed, rc, tl, lender, borrower, liquidator } = ctx;
+    await fund(ast, lender, pair, 10_000n);
+    await pair.connect(lender).deposit(10_000n, lender.address);
+    await fund(col, borrower, pair, 1_500n);
+    const brc = await (await pair.connect(borrower).borrowAsset(1_000n, 1_500n, borrower.address)).wait();
+    const t0 = BigInt((await ethers.provider.getBlock(brc.blockNumber)).timestamp);
+    await time.setNextBlockTimestamp(t0 + 100n);
+    await pair.addInterest(false); // 100 * 1,000 * 1e16 / 1e18 = 1,000 wei, remainder 0
+    expect(va(await pair.totalBorrow())).to.deep.equal({ amount: 2_000n, shares: 1_000n });
+    await pair.connect(tl).setRateContract(rc.zero.target); // the liquidation block accrues nothing
+    await astFeed.setAnswer((2n * 10n ** 8n).toString()); // 2:1
+    await fund(ast, liquidator, pair, 10_000n);
+    return ctx;
+}
+
+describe("S5b round 1: Codex review fixes", function () {
+    describe("A: no debt is left once the last borrow share is burned", function () {
+        it("Codex's case: liquidating 500 of 1,000 shares leaves totalBorrow = (0, 0), not (500, 0)", async function () {
+            const { pair, rc, tl, borrower, liquidator } = await loadFixture(fxOffsetToy);
+            await pair.updateExchangeRate();
+            expect((await pair.exchangeRateInfo())[4]).to.equal(2n * E18);
+            const ta0 = va(await pair.totalAsset());
+            const r = await (await pair.connect(liquidator).liquidate(500n, (await time.latest()) + 3600, borrower.address)).wait();
+            const ev = parseEvent(pair, r, "Liquidate");
+            // L = toAmount(500) * 2 = 750 * 2 = 1,500 >= collateral / 1.1 -> clean path, all 1,500 collateral
+            expect(ev.args._collateralForLiquidator).to.equal(1_500n);
+            expect(ev.args._feesAmount).to.equal(0n); // no bonus
+            expect(ev.args._amountLiquidatorToRepay).to.equal(750n);
+            expect(ev.args._sharesToAdjust).to.equal(500n);
+            expect(ev.args._amountToAdjust).to.equal(750n);
+            const tb1 = va(await pair.totalBorrow());
+            console.log(`      after the liquidation: totalBorrow (${tb1.amount}, ${tb1.shares})`);
+            expect(tb1).to.deep.equal({ amount: 0n, shares: 0n });
+            // lenders absorb the 750 write-off plus the 500 residue
+            const ta1 = va(await pair.totalAsset());
+            expect(ta0.amount - ta1.amount).to.equal(1_250n);
+            expect(ta1.shares).to.equal(ta0.shares);
+            expect(await pair.userBorrowShares(borrower.address)).to.equal(0n);
+            expect(await pair.userCollateralBalance(borrower.address)).to.equal(0n);
+            await pair.connect(tl).setRateContract(rc.hi.target);
+            await expectNoDebtAndNoLaterInterest(pair);
+        });
+
+        it("a sole borrower's full repayAsset leaves totalBorrow = (0, 0)", async function () {
+            const { pair, weth, usdc, lenderA, borrower } = await build({ rate: "flat10" });
+            await fund(weth, lenderA, pair, weth18("10"));
+            await pair.connect(lenderA).deposit(weth18("10"), lenderA.address);
+            await fund(usdc, borrower, pair, usdc6("4000"));
+            await pair.connect(borrower).borrowAsset(weth18("1"), usdc6("4000"), borrower.address); // LTV 60%
+            await fund(weth, borrower, pair, weth18("1"));
+            await time.increase(365 * DAY);
+
+            const ts = BigInt(await time.latest()) + 100n;
+            const I = await nextInterest(pair, ts, R10);
+            const tb = va(await pair.totalBorrow());
+            const ta = va(await pair.totalAsset());
+            const tb1 = { amount: tb.amount + I, shares: tb.shares };
+            const shares = await pair.userBorrowShares(borrower.address);
+            expect(shares).to.equal(tb.shares); // sole borrower
+            const repay = vaToAmount(tb1, shares, true);
+            const residue = tb1.amount - repay;
+            expect(residue).to.be.gt(0n); // ~1e3 x (share price - 1) = ~100 wei
+            const bal0 = await weth.balanceOf(borrower.address);
+            await time.setNextBlockTimestamp(ts);
+            await pair.connect(borrower).repayAsset(shares, borrower.address);
+            const tbAfter = va(await pair.totalBorrow());
+            console.log(`      residue ${residue} wei; after full repay totalBorrow (${tbAfter.amount}, ${tbAfter.shares})`);
+            expect(bal0 - (await weth.balanceOf(borrower.address))).to.equal(repay);
+            expect(tbAfter).to.deep.equal({ amount: 0n, shares: 0n });
+            expect((await pair.totalAsset())[0]).to.equal(ta.amount + I - residue);
+            await expectNoDebtAndNoLaterInterest(pair);
+        });
+
+        it("a dirty liquidation that repays every share leaves totalBorrow = (0, 0)", async function () {
+            const ctx = await build({ cleanLiquidationFee: "5000", protocolLiquidationFee: "10000", rate: "flat10" });
+            const { pair, weth, usdc, wethFeed, oracle, lenderA, borrower, liquidator } = ctx;
+            await fund(weth, lenderA, pair, weth18("10"));
+            await pair.connect(lenderA).deposit(weth18("10"), lenderA.address);
+            await fund(usdc, borrower, pair, usdc6("3000"));
+            await pair.connect(borrower).borrowAsset(weth18("0.85"), usdc6("3000"), borrower.address);
+            await fund(weth, liquidator, pair, weth18("2"));
+            await time.increase(365 * DAY);
+            await wethFeed.setAnswer((2600n * 10n ** 8n).toString()); // LTV ~81%
+
+            const ts = BigInt(await time.latest()) + 100n;
+            const I = await nextInterest(pair, ts, R10);
+            const tb = va(await pair.totalBorrow());
+            const ta = va(await pair.totalAsset());
+            const tb1 = { amount: tb.amount + I, shares: tb.shares };
+            const shares = await pair.userBorrowShares(borrower.address);
+            expect(shares).to.equal(tb.shares);
+            const coll = await pair.userCollateralBalance(borrower.address);
+            const [, low] = await oracle.getPrices();
+            const L = (vaToAmount(tb1, shares, false) * low) / E18;
+            expect((L * 105_000n) / 100_000n).to.be.lt(coll); // dirty path even though every share is repaid
+            const gross = (L * 104_500n) / 100_000n;
+            const fee = (10_000n * (gross - L)) / 100_000n;
+            const repay = vaToAmount(tb1, shares, true);
+            const residue = tb1.amount - repay;
+            expect(residue).to.be.gt(0n);
+
+            await time.setNextBlockTimestamp(ts);
+            const r = await (await pair.connect(liquidator).liquidate(shares, ts + 3600n, borrower.address)).wait();
+            const ev = parseEvent(pair, r, "Liquidate");
+            expect(ev.args._sharesToAdjust).to.equal(0n);
+            expect(ev.args._amountToAdjust).to.equal(0n);
+            expect(ev.args._amountLiquidatorToRepay).to.equal(repay);
+            expect(ev.args._feesAmount).to.equal(fee);
+            expect(ev.args._collateralForLiquidator).to.equal(gross - fee);
+            expect(await pair.userCollateralBalance(borrower.address)).to.equal(coll - gross); // borrower keeps the rest
+            expect(await pair.userBorrowShares(borrower.address)).to.equal(0n);
+            const tbAfter = va(await pair.totalBorrow());
+            console.log(`      residue ${residue} wei; after the dirty liquidation totalBorrow (${tbAfter.amount}, ${tbAfter.shares})`);
+            expect(tbAfter).to.deep.equal({ amount: 0n, shares: 0n });
+            expect((await pair.totalAsset())[0]).to.equal(ta.amount + I - residue);
+            await expectNoDebtAndNoLaterInterest(pair);
+        });
+    });
+
+    describe("B: globalPause checks that every pair really is paused", function () {
+        async function fxTwoPairs() {
+            const ctx = await build();
+            const { core, pairConfig } = ctx;
+            const Token = await ethers.getContractFactory("MockERC20");
+            const asset2 = await Token.deploy("WETH2", "WETH2", 18);
+            const coll2 = await Token.deploy("USDC2", "USDC2", 6);
+            await asset2.mint(core.lightlendPairDeployer.target, weth18("1"));
+            const pair2 = (await ethers.getContractFactory("LightlendPair")).attach(
+                await setup.deployPair({ ...pairConfig, assetTokenAddress: asset2.target, collateralTokenAddress: coll2.target })
+            );
+            const cb = await impersonate(await core.lightlendPairDeployer.circuitBreakerAddress());
+            const tl = await impersonate(core.timelock.target);
+            return { ...ctx, pair2, cb, tl };
+        }
+
+        it("a pair with revoked borrow (or interest) access control makes globalPause revert", async function () {
+            const { core, pair, pair2, cb, tl } = await loadFixture(fxTwoPairs);
+            const deployer = core.lightlendPairDeployer;
+            await pair2.connect(tl).revokeBorrowLimitAccessControl(ethers.MaxUint256);
+            await expect(deployer.connect(cb).globalPause([pair.target, pair2.target]))
+                .to.be.revertedWithCustomError(deployer, "PairNotPaused")
+                .withArgs(pair2.target);
+            expect(await pair.isWithdrawPaused()).to.equal(false); // all or nothing
+            expect(await pair2.borrowLimit()).to.equal(ethers.MaxUint256);
+
+            const { pair: pair3 } = await loadFixture(fxTwoPairs);
+            await pair3.connect(tl).revokeInterestAccessControl();
+            await expect(deployer.connect(cb).globalPause([pair3.target]))
+                .to.be.revertedWithCustomError(deployer, "PairNotPaused")
+                .withArgs(pair3.target);
+        });
+
+        it("a deployed non-pair whose fallback returns success makes globalPause revert", async function () {
+            const { core, pair, cb } = await loadFixture(fxTwoPairs);
+            const deployer = core.lightlendPairDeployer;
+            const stop = await deployRaw("00"); // succeeds with empty return data
+            const zeroWord = await deployRaw("60206000f3"); // succeeds returning 32 zero bytes
+            await expect(deployer.connect(cb).globalPause([pair.target, stop])).to.be.reverted;
+            await expect(deployer.connect(cb).globalPause([pair.target, zeroWord]))
+                .to.be.revertedWithCustomError(deployer, "PairNotPaused")
+                .withArgs(zeroWord);
+            expect(await pair.isWithdrawPaused()).to.equal(false);
+        });
+    });
+
+    describe("C: fee shares never revert or truncate at the uint128 ceiling", function () {
+        const M = U128_MAX;
+
+        /// Codex's scenario: after a write-off the asset share price is below 1, the uint64-max flat rate
+        /// caps interest at the uint128 headroom, and a 50% protocol fee would need more new shares than
+        /// totalAsset.shares can hold.
+        async function fxFeeOverflow() {
+            const ctx = await buildRaw({ rates: { zero: 0n, max: U64_MAX, r10: R10 } });
+            const { pair, ast, col, astFeed, rc, tl, lender, borrower, liquidator, borrower2 } = ctx;
+            const D = (M * 90n) / 100n;
+            const B1 = (M * 30n) / 100n;
+            const d = (M * 3n) / 100n;
+            await fund(ast, lender, pair, D);
+            await pair.connect(lender).deposit(D, lender.address);
+            await fund(col, borrower, pair, 2n * B1);
+            await pair.connect(borrower).borrowAsset(B1, 2n * B1, borrower.address);
+            await fund(col, borrower2, pair, 2n * d);
+            await pair.connect(borrower2).borrowAsset(d, 2n * d, borrower2.address);
+            // asset 100x: borrower 1 is deeply insolvent; repay 0.006M and take all collateral (clean path)
+            await astFeed.setAnswer((100n * 10n ** 8n).toString());
+            await fund(ast, liquidator, pair, M / 10n);
+            const r = await (
+                await pair.connect(liquidator).liquidate((M * 6n) / 1000n, (await time.latest()) + 3600, borrower.address)
+            ).wait();
+            expect(parseEvent(pair, r, "Liquidate").args._amountToAdjust).to.be.gt((M * 29n) / 100n);
+            await pair.connect(tl).changeFee(50_000); // MAX_PROTOCOL_FEE
+            await pair.connect(tl).setRateContract(rc.max.target);
+            await fund(ast, borrower2, pair, M / 2n);
+            return ctx;
+        }
+
+        /// The next accrual's capped interest and the fee shares it would need, which do not fit.
+        async function expectFeeSharesWouldOverflow(pair) {
+            const ta = va(await pair.totalAsset());
+            const tb = va(await pair.totalBorrow());
+            const I = M - (ta.amount > tb.amount ? ta.amount : tb.amount); // capped at the headroom
+            const F = (I * 50_000n) / 100_000n;
+            const need = (F * ta.shares) / (ta.amount + I - F);
+            console.log(
+                `      assets ${(ta.amount * 100n) / M}% M, shares ${(ta.shares * 100n) / M}% M, debt ${(tb.amount * 100n) / M}% M;` +
+                    ` fee shares needed ${(need * 100n) / M}% M vs headroom ${((M - ta.shares) * 100n) / M}% M`
+            );
+            expect(need).to.be.gt(M - ta.shares);
+            return { I, ta };
+        }
+
+        function expectFeeSkipped(pair, rc, I, ta) {
+            const ev = parseEvent(pair, rc, "AddInterest");
+            expect(ev.args.interestEarned).to.equal(I);
+            expect(ev.args.feesAmount).to.equal(0n);
+            expect(ev.args.feesShare).to.equal(0n);
+            expect(ta.amount + I).to.equal(M); // the interest was capped at the asset headroom
+        }
+
+        it("pause() succeeds; the protocol fee is skipped for that accrual", async function () {
+            const { pair } = await loadFixture(fxFeeOverflow);
+            const { I, ta } = await expectFeeSharesWouldOverflow(pair);
+            const cb = await impersonate(await pair.circuitBreakerAddress());
+            const rc = await (await pair.connect(cb).pause()).wait();
+            expectFeeSkipped(pair, rc, I, ta);
+            expect(va(await pair.totalAsset())).to.deep.equal({ amount: ta.amount + I, shares: ta.shares });
+            expect(await pair.balanceOf(pair.target)).to.equal(0n);
+            expect(await pair.isInterestPaused()).to.equal(true);
+        });
+
+        it("repayAsset() succeeds; fees are skipped, then charged normally once they fit", async function () {
+            const { pair, rc: rates, tl, lender, borrower2 } = await loadFixture(fxFeeOverflow);
+            const { I, ta } = await expectFeeSharesWouldOverflow(pair);
+            const shares = await pair.userBorrowShares(borrower2.address);
+            const r = await (await pair.connect(borrower2).repayAsset(shares / 2n, borrower2.address)).wait();
+            expectFeeSkipped(pair, r, I, ta);
+            expect(await pair.userBorrowShares(borrower2.address)).to.equal(shares - shares / 2n);
+            expect((await pair.totalAsset())[1]).to.equal(ta.shares);
+
+            // make room: the lender takes a third of its shares out, and the rate goes back to ~10%
+            await pair.connect(lender).redeem((await pair.balanceOf(lender.address)) / 3n, lender.address, lender.address);
+            await pair.connect(tl).setRateContract(rates.r10.target);
+            const shares0 = (await pair.totalAsset())[1];
+            await time.increase(DAY);
+            const r2 = await (await pair.addInterest(false)).wait();
+            const ev = parseEvent(pair, r2, "AddInterest");
+            expect(ev.args.interestEarned).to.be.gt(0n);
+            expect(ev.args.feesAmount).to.equal((ev.args.interestEarned * 50_000n) / 100_000n);
+            expect(ev.args.feesShare).to.be.gt(0n);
+            expect((await pair.totalAsset())[1] - shares0).to.equal(ev.args.feesShare);
+            expect(await pair.balanceOf(pair.target)).to.equal(ev.args.feesShare);
+        });
+
+        it("liquidate() succeeds; the protocol fee is skipped for that accrual", async function () {
+            const { pair, col, liquidator, borrower2 } = await loadFixture(fxFeeOverflow);
+            const { I, ta } = await expectFeeSharesWouldOverflow(pair);
+            const shares0 = await pair.userBorrowShares(borrower2.address);
+            const col0 = await col.balanceOf(liquidator.address);
+            const r = await (await pair.connect(liquidator).liquidate(1000n, (await time.latest()) + 3600, borrower2.address)).wait();
+            expectFeeSkipped(pair, r, I, ta);
+            expect(await pair.userBorrowShares(borrower2.address)).to.equal(shares0 - 1000n); // dirty partial liquidation
+            expect((await col.balanceOf(liquidator.address)) - col0).to.equal(parseEvent(pair, r, "Liquidate").args._collateralForLiquidator);
+            expect((await pair.totalAsset())[1]).to.equal(ta.shares); // no fee shares minted
         });
     });
 });

@@ -115,7 +115,7 @@ abstract contract LightlendPairCore is
     /// @notice Truncated interest numerator carried to the next accrual (ISO-09 remainder carry)
     /// @dev Units: asset wei x RATE_PRECISION. Always < RATE_PRECISION, i.e. worth less than 1 wei of
     ///      interest. Frozen (neither consumed nor reset) while interest is paused; reset to 0 when the
-    ///      uint128 accounting ceiling caps or skips an accrual. See _calculateInterest.
+    ///      uint128 accounting ceiling caps or skips a whole-wei accrual. See _calculateInterest.
     uint256 public interestRemainder;
 
     /// @notice Emitted when interest accrual would overflow uint128
@@ -389,10 +389,11 @@ abstract contract LightlendPairCore is
             // Calculate interest accrued, carrying the truncated remainder (ISO-09). The numerator
             // (asset wei x RATE_PRECISION) includes the remainder left by the previous accrual, and the
             // part that does not make a whole wei is stored for the next one (< RATE_PRECISION, so the
-            // carry adds at most 1 wei to any single accrual). With 1-second blocks, per-block accrual
-            // therefore sums to the same interest as one accrual over the whole period. lastTimestamp
-            // still advances on every accrual, including when the interest is 0, so idle time is never
-            // charged to principal borrowed later (R1-3).
+            // carry adds at most 1 wei to any single accrual). With 1-second blocks this removes the
+            // truncation loss of per-block accrual; compounding still makes N one-second accruals
+            // slightly larger than one N-second accrual. lastTimestamp still advances on every accrual,
+            // including when the interest is 0, so idle time is never charged to principal borrowed
+            // later (R1-3).
             uint256 _numerator = _deltaTime *
                 _results.totalBorrow.amount *
                 _results.newRate +
@@ -417,7 +418,8 @@ abstract contract LightlendPairCore is
                     ? maxBorrowHeadroom
                     : maxAssetHeadroom;
                 // Interest that does not fit is forfeited, and so is its sub-wei remainder: the carry
-                // resets to 0 whenever the ceiling caps or skips an accrual.
+                // resets to 0 whenever the ceiling caps or skips a whole-wei accrual. A sub-wei
+                // remainder from a zero-wei accrual at the ceiling is still carried (worth < 1 wei).
                 _results.interestRemainder = 0;
             }
 
@@ -427,17 +429,21 @@ abstract contract LightlendPairCore is
                 _results.totalBorrow.amount += uint128(_results.interestEarned);
                 _results.totalAsset.amount += uint128(_results.interestEarned);
                 if (_currentRateInfo.feeToProtocolRate > 0) {
-                    _results.feesAmount =
-                        (_results.interestEarned * _currentRateInfo.feeToProtocolRate) /
-                        FEE_PRECISION;
+                    uint256 _feesAmount = (_results.interestEarned *
+                        _currentRateInfo.feeToProtocolRate) / FEE_PRECISION;
+                    uint256 _feesShare = (_feesAmount * _results.totalAsset.shares) /
+                        (_results.totalAsset.amount - _feesAmount);
 
-                    _results.feesShare =
-                        (_results.feesAmount * _results.totalAsset.shares) /
-                        (_results.totalAsset.amount - _results.feesAmount);
-
-                    // Effects: Give new shares to this contract, effectively diluting lenders an amount equal to the fees
-                    // We can safely cast because _feesShare < _feesAmount < interestEarned which is always less than uint128
-                    _results.totalAsset.shares += uint128(_results.feesShare);
+                    // Effects: Give new shares to this contract, effectively diluting lenders an amount equal to the fees.
+                    // Like the interest cap above, this must never revert or truncate: after a write-off the
+                    // share price is below 1, so near the uint128 ceiling the fee shares may not fit in
+                    // totalAsset.shares. In that case the protocol fee is skipped for this accrual (all of the
+                    // interest goes to lenders); it is charged normally on later accruals once it fits.
+                    if (_feesShare <= type(uint128).max - _results.totalAsset.shares) {
+                        _results.feesAmount = _feesAmount;
+                        _results.feesShare = _feesShare;
+                        _results.totalAsset.shares += uint128(_feesShare);
+                    }
                 }
             }
         }
@@ -1007,6 +1013,16 @@ abstract contract LightlendPairCore is
         // Effects: Bookkeeping
         _totalBorrow.amount -= _amountToRepay;
         _totalBorrow.shares -= _shares;
+
+        // The virtual-share offset makes the burned shares convert to slightly less than the recorded
+        // debt (about 1e3 x (share price - 1) units in total). Once the last borrow share is gone that
+        // residue is owed by nobody, so write it off against lenders here instead of letting it accrue
+        // interest credited to totalAsset. Covers full repayment and every liquidation path; the
+        // clean-path write-off in liquidate() has already been taken out of both totals.
+        if (_totalBorrow.shares == 0 && _totalBorrow.amount > 0) {
+            totalAsset.amount -= _totalBorrow.amount;
+            _totalBorrow.amount = 0;
+        }
 
         // Effects: write to state
         userBorrowShares[_borrower] -= _shares;

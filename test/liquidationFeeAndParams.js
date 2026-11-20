@@ -729,11 +729,15 @@ async function liquidateExact(m, { wethUsd, sharesOf, branch }) {
     expect(await pair.userCollateralBalance(borrower.address)).to.equal(coll - gross);
     expect(await pair.userBorrowShares(borrower.address)).to.equal(borrowerShares - s - sharesToAdjust);
     if (leftover <= 0n) expect(await pair.userBorrowShares(borrower.address)).to.equal(0n); // ISO-02
+    // S5b round 1: when the last borrow share is burned, the virtual-offset residue is written off too
+    const sharesLeft = tb1.shares - s - sharesToAdjust;
+    const amountLeft = tb1.amount - amountToAdjust - repay;
+    const dust = sharesLeft === 0n ? amountLeft : 0n;
     const tbAfter = va(await pair.totalBorrow());
-    expect(tbAfter.amount).to.equal(tb1.amount - amountToAdjust - repay);
-    expect(tbAfter.shares).to.equal(tb1.shares - s - sharesToAdjust);
-    expect((await pair.totalAsset())[0]).to.equal(ta1.amount - amountToAdjust);
-    return { net, fee, gross, L, repay, amountToAdjust };
+    expect(tbAfter.amount).to.equal(amountLeft - dust);
+    expect(tbAfter.shares).to.equal(sharesLeft);
+    expect((await pair.totalAsset())[0]).to.equal(ta1.amount - amountToAdjust - dust);
+    return { net, fee, gross, L, repay, amountToAdjust, dust };
 }
 
 /// Pair at the uint128 accounting ceiling: flat uint64.max per-second rate (accepted by validation),

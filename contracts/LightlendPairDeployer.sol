@@ -357,7 +357,10 @@ contract LightlendPairDeployer is Ownable {
 
     /// @notice The ```globalPause``` function calls the pause() function on a given set of pair addresses
     /// @dev ISO-07: all or nothing. If any pair's pause() reverts (e.g. a pair this deployer did not
-    ///      deploy, or an address that is not a pair), the whole call reverts, so a successful return
+    ///      deploy, or an address that is not a pair), the whole call reverts. After each pause() the
+    ///      pair's state is read back: borrow and deposit limits 0, withdraw and interest paused. A pair
+    ///      whose access control was revoked (pause() is then a partial no-op) reverts with
+    ///      PairNotPaused, and a non-pair contract reverts on the read. A successful return therefore
     ///      means every listed pair is paused. Pairs accept pause() from their DEPLOYER_ADDRESS.
     /// @param _addresses Addresses to pause()
     /// @return _updatedAddresses The paused addresses (always equal to `_addresses`)
@@ -369,7 +372,14 @@ contract LightlendPairDeployer is Ownable {
         uint256 _lengthOfArray = _addresses.length;
         _updatedAddresses = new address[](_lengthOfArray);
         for (uint256 i = 0; i < _lengthOfArray; ) {
-            ILightlendPair(_addresses[i]).pause();
+            ILightlendPair _pair = ILightlendPair(_addresses[i]);
+            _pair.pause();
+            if (
+                _pair.borrowLimit() != 0 ||
+                _pair.depositLimit() != 0 ||
+                !_pair.isWithdrawPaused() ||
+                !_pair.isInterestPaused()
+            ) revert PairNotPaused(_addresses[i]);
             _updatedAddresses[i] = _addresses[i];
             unchecked {
                 i = i + 1;
@@ -382,6 +392,7 @@ contract LightlendPairDeployer is Ownable {
     // ============================================================================================
 
     error CircuitBreakerOnly();
+    error PairNotPaused(address pair);
     error WhitelistedDeployersOnly();
     error Create2Failed();
     error MustSeedPair();
