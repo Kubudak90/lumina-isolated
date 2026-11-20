@@ -26,8 +26,9 @@
 //     the whitelist and registry ownership and calls revokeDeployerSwapperAccess() on each pair.
 //   LUMINA_ISOLATED_PHASE=finalize  (no transaction)
 //     5. Every isolated role is read from the chain and compared with the decision-3 layout (Safe /
-//        Timelock, nothing pending, deployer and bots without deploy rights, swapper access revoked);
-//        only then are the observed holders written to `roles.isolated`.
+//        Timelock, nothing pending, deployer and bots without deploy rights, swapper access revoked,
+//        no default swapper, no approved swapper); only then are the observed holders written to
+//        `roles.isolated`.
 //
 // Usage (the chain comes from the manifest; the RPC URL from the env var the manifest names):
 //   LUMINA_ISOLATED_PHASE=deploy LUMINA_MANIFEST=/path/manifest.json \
@@ -38,6 +39,9 @@
 //                           the Safe constants are read from <monorepo>/scripts/lib/checks.mjs next to it
 //   LUMINA_ALLOW_DIRTY=true deploy from a checkout with uncommitted changes (local iteration only)
 //   LUMINA_EXPECT_NOOP=1    refuse every broadcast and every manifest or checkpoint change (no-op check)
+//   LUMINA_ISOLATED_RECOVER_ONLY=1  phase "deploy" only reconciles a pending record (adopting and
+//                           publishing a mined result) and stops before its first new transaction
+//                           (the harness runs it before any seed funding, as S4c's run.mjs does)
 //   LUMINA_ISOLATED_TEST_CRASH=<before-send|after-mined|after-done>:<step>  exit with 97 at that
 //                           point (crash-recovery tests; accepted only on an anvil node)
 //
@@ -97,6 +101,7 @@ const SAFE_SENTINEL = "0x0000000000000000000000000000000000000001";
 const SAFE_FALLBACK_HANDLER_SLOT = ethers.id("fallback_manager.handler.address");
 const SAFE_GUARD_SLOT = ethers.id("guard_manager.guard.address");
 const EXPECT_NOOP = process.env.LUMINA_EXPECT_NOOP === "1";
+const RECOVER_ONLY = process.env.LUMINA_ISOLATED_RECOVER_ONLY === "1";
 const TEST_CRASH = process.env.LUMINA_ISOLATED_TEST_CRASH || null;
 const LOG_RANGE = 5_000;
 
@@ -285,6 +290,32 @@ async function checkSafe(m, checks, checkpoint) {
   return safe;
 }
 
+/** Refusal reason if the pair deployer has a default swapper (only a contract revert on index 0 means none). */
+async function defaultSwapperProblem(pd) {
+  try {
+    const first = await pd.defaultSwappers(0);
+    return `LightlendPairDeployer has a default swapper (${first})`;
+  } catch (err) {
+    if (!R.isContractRevert(err)) throw err;
+    return null;
+  }
+}
+
+/** Every swapper a SetSwapper log since the pair's creation block named must be off (leverage paths stay closed). */
+async function approvedSwappers(pair, fromBlock) {
+  const topic = pair.interface.getEvent("SetSwapper").topicHash;
+  const logs = await R.getLogsChunked(ethers.provider, { address: await pair.getAddress(), topics: [topic] }, fromBlock, await ethers.provider.getBlockNumber(), LOG_RANGE);
+  const approved = [];
+  for (const l of logs) {
+    const who = pair.interface.parseLog(l).args.swapper;
+    if (await pair.swappers(who)) approved.push(`swapper ${who} is approved (SetSwapper in ${l.transactionHash})`);
+  }
+  return { approved, logs: logs.length };
+}
+
+/** Thrown to stop LUMINA_ISOLATED_RECOVER_ONLY before the first new transaction. */
+class RecoverOnlyStop extends Error {}
+
 async function main() {
   const phase = process.env.LUMINA_ISOLATED_PHASE;
   if (!PHASES.includes(phase)) fail(`set LUMINA_ISOLATED_PHASE to one of ${PHASES.join(", ")}`);
@@ -300,7 +331,7 @@ async function main() {
   // ---- chain: from the manifest, refused on mismatch
   const network = await ethers.provider.getNetwork();
   if (BigInt(m.chainId) !== network.chainId) fail(`manifest chainId ${m.chainId} != RPC chain ${network.chainId} (network ${hre.network.name})`);
-  if (TEST_CRASH && !/anvil/i.test(await ethers.provider.send("web3_clientVersion", []))) fail("LUMINA_ISOLATED_TEST_CRASH is only accepted on an anvil node");
+  if (TEST_CRASH && !/^anvil\//i.test(await ethers.provider.send("web3_clientVersion", []))) fail("LUMINA_ISOLATED_TEST_CRASH is only accepted on an anvil node");
   console.log(`deploy-lighter-isolated (${phase}${EXPECT_NOOP ? ", no-op mode" : ""}): ${m.environment} (chain ${m.chainId}), manifest ${mf.file}`);
 
   // ---- inputs from the core and oracle deploys, checked on-chain before any transaction
@@ -408,6 +439,7 @@ async function main() {
    */
   const send = async (step, label, contract, method, args = [], { keep = false, expectAddress = false } = {}) => {
     if (EXPECT_NOOP) fail(`no-op mode: refusing to send ${label}`);
+    if (RECOVER_ONLY) throw new RecoverOnlyStop(label);
     beforeSend();
     const target = await contract.getAddress();
     if (forbidden.some((a) => eq(a, target)) || m.compromised.some((a) => args.some((x) => eq(String(x), a)))) {
@@ -438,6 +470,7 @@ async function main() {
   /** CREATE with a write-ahead record; returns the address. The manifest is written by publish(). */
   const deploy = async (key, name, args) => {
     if (EXPECT_NOOP) fail(`no-op mode: refusing to deploy ${name}`);
+    if (RECOVER_ONLY) throw new RecoverOnlyStop(`deploy ${name}`);
     beforeSend();
     const factory = await ethers.getContractFactory(name, deployer);
     const request = await factory.getDeployTransaction(...args);
@@ -537,7 +570,20 @@ async function main() {
     return { ...p, hash: tx.hash, receipt };
   };
 
+  if (phase === "deploy" && RECOVER_ONLY && !checkpoint.pending) {
+    console.log("deploy-lighter-isolated (deploy, recover only): no pending record; nothing to do");
+    return;
+  }
   if (phase === "deploy") {
+    try {
+      await deployPhase();
+    } catch (err) {
+      if (!(err instanceof RecoverOnlyStop)) throw err;
+      if (checkpoint.pending) fail(`recover only: the pending record ${checkpoint.pending.step} is still open before ${err.message}`);
+      console.log(`deploy-lighter-isolated (deploy, recover only): pending record resolved; stopped before the next transaction (${err.message})`);
+    }
+  }
+  async function deployPhase() {
     let recovered = await reconcile();
     const takeRecovered = (step) => {
       if (!recovered) return null;
@@ -591,12 +637,8 @@ async function main() {
         expectEq("LightlendPairDeployer.timelockAddress()", await d.timelockAddress(), timelockAddress);
         expectEq("LightlendPairDeployer.lightlendWhitelistAddress()", await d.lightlendWhitelistAddress(), whitelistAddress);
         expectEq("LightlendPairDeployer.lightlendPairRegistryAddress()", await d.lightlendPairRegistryAddress(), registryAddress);
-        try {
-          await d.defaultSwappers(0);
-          fail("LightlendPairDeployer has default swappers");
-        } catch (err) {
-          if (!R.isContractRevert(err)) throw err; // only an out-of-bounds revert means "empty"
-        }
+        const problem = await defaultSwapperProblem(d);
+        if (problem) fail(problem);
       },
     );
     const pd = await at("LightlendPairDeployer", pairDeployerAddress);
@@ -801,11 +843,8 @@ async function main() {
       const seedShares = await pair.balanceOf(pairDeployerAddress);
       if (seedShares < seedDeposit.args.shares) fail(`${spec.name}: the pair deployer holds ${seedShares} seed shares, minted ${seedDeposit.args.shares}`);
       // No swapper may be approved (leverage paths stay off): every SetSwapper since creation.
-      const swapLogs = await R.getLogsChunked(ethers.provider, { address: pairAddress, topics: [pair.interface.getEvent("SetSwapper").topicHash] }, creation.blockNumber, await ethers.provider.getBlockNumber(), LOG_RANGE);
-      for (const l of swapLogs) {
-        const who = pair.interface.parseLog(l).args.swapper;
-        if (await pair.swappers(who)) fail(`${spec.name}: swapper ${who} is approved (SetSwapper in ${l.transactionHash})`);
-      }
+      const swappers = await approvedSwappers(pair, creation.blockNumber);
+      if (swappers.approved.length) fail(`${spec.name}: ${swappers.approved.join("; ")}`);
 
       m.contracts[spec.key].address = pairAddress;
       m.contracts[spec.key].codehash = ethers.keccak256(code);
@@ -933,7 +972,18 @@ async function main() {
       check(`${spec.name} pendingTimelockAddress()`, await pair.pendingTimelockAddress(), ZERO);
       check(`${spec.name} circuitBreakerAddress()`, await pair.circuitBreakerAddress(), expected.pairCircuitBreaker);
       if (!(await pair.deployerSwapperRevoked())) problems.push(`${spec.name} deployerSwapperRevoked() is false (the Safe must call revokeDeployerSwapperAccess)`);
+      // Leverage paths stay closed: no swapper approved since the pair's creation (as the deploy phase).
+      const creationTx = m.markets.isolated.find((x) => x.name === spec.name)?.params?.creationTx;
+      const creation = creationTx ? await ethers.provider.getTransactionReceipt(creationTx) : null;
+      if (!creation || creation.status !== 1) {
+        problems.push(`${spec.name}: no recorded creation transaction (markets.isolated params.creationTx)`);
+      } else {
+        const swappers = await approvedSwappers(pair, creation.blockNumber);
+        for (const a of swappers.approved) problems.push(`${spec.name}: ${a}`);
+      }
     }
+    const defaultSwapper = await defaultSwapperProblem(pd);
+    if (defaultSwapper) problems.push(defaultSwapper);
     if (problems.length) fail(`the isolated handover is not complete:\n  - ${problems.join("\n  - ")}`);
     for (const [k, v] of Object.entries(expected)) m.roles.isolated[k] = ethers.getAddress(v);
     m.roles.isolated.timelockDelaySec = Number(await timelock.delay());

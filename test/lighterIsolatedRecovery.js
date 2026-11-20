@@ -90,6 +90,16 @@ describe("Lighter isolated deploy: recovery helpers (S5c)", function () {
             expect(() => cp.setPending({ step: "b" })).to.throw(/already exists/);
         });
 
+        it("refuses to change a key that is not isolated* (S4c's records stay untouched)", function () {
+            const cp = new R.Checkpoint(file);
+            const before = fs.readFileSync(file, "utf8");
+            const data = cp.read();
+            expect(() => cp.write({ ...data, safeProbe: { queueTx: "0x02" } })).to.throw(/non-isolated checkpoint key safeProbe/);
+            expect(fs.readFileSync(file, "utf8")).to.equal(before);
+            cp.write({ ...data, isolatedSafeHandover: [] });
+            expect(cp.read().safeProbe).to.deep.equal({ queueTx: "0x01" });
+        });
+
         it("in no-op mode refuses to write at all", function () {
             const before = fs.readFileSync(file, "utf8");
             const cp = new R.Checkpoint(file, { noop: true });
