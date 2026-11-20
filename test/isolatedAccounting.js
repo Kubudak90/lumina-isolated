@@ -1033,11 +1033,11 @@ describe("S5b round 1: Codex review fixes", function () {
             const { core, cb } = await loadFixture(fxTwoPairs);
             const deployer = core.lightlendPairDeployer;
             const fake = await deployFakePair();
-            expect(await deployer.isDeployedPair(fake)).to.equal(false);
             await expect(deployer.connect(cb).globalPause([fake])).to.be.reverted; // r1 code: passed the read-backs
             await expect(deployer.connect(cb).globalPause([fake]))
                 .to.be.revertedWithCustomError(deployer, "NotDeployedPair")
                 .withArgs(fake);
+            expect(await deployer.isDeployedPair(fake)).to.equal(false);
         });
 
         it("a batch with one real pair and one fake reverts as a whole", async function () {
