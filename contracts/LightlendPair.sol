@@ -533,8 +533,11 @@ contract LightlendPair is IERC20Metadata, LightlendPairCore {
     ///      Liquidation stays enabled so insolvency can still be processed. Use
     ///      `pauseLiquidate` / `pauseRepay` only for a targeted exploit response.
     ///      Those narrower flags are not toggled here or in `unpause`.
+    ///      ISO-07: besides the circuit breaker, owner and timelock, the pair's own deployer
+    ///      (`DEPLOYER_ADDRESS`) may call `pause()` so `LightlendPairDeployer.globalPause` works. The
+    ///      deployer gets no other access: `unpause` and every setter keep their original checks.
     function pause() external {
-        _requireProtocolOrOwner();
+        if (msg.sender != DEPLOYER_ADDRESS) _requireProtocolOrOwner();
         if (!isBorrowAccessControlRevoked) _setBorrowLimit(0);
         if (!isDepositAccessControlRevoked) _setDepositLimit(0);
         if (!isWithdrawAccessControlRevoked) _pauseWithdraw(true);

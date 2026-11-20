@@ -356,22 +356,21 @@ contract LightlendPairDeployer is Ownable {
     // ============================================================================================
 
     /// @notice The ```globalPause``` function calls the pause() function on a given set of pair addresses
-    /// @dev Ignores reverts when calling pause()
-    /// @param _addresses Addresses to attempt to pause()
-    /// @return _updatedAddresses Addresses for which pause() was successful
+    /// @dev ISO-07: all or nothing. If any pair's pause() reverts (e.g. a pair this deployer did not
+    ///      deploy, or an address that is not a pair), the whole call reverts, so a successful return
+    ///      means every listed pair is paused. Pairs accept pause() from their DEPLOYER_ADDRESS.
+    /// @param _addresses Addresses to pause()
+    /// @return _updatedAddresses The paused addresses (always equal to `_addresses`)
     function globalPause(
         address[] memory _addresses
     ) external returns (address[] memory _updatedAddresses) {
         if (msg.sender != circuitBreakerAddress) revert CircuitBreakerOnly();
 
-        address _pairAddress;
         uint256 _lengthOfArray = _addresses.length;
         _updatedAddresses = new address[](_lengthOfArray);
         for (uint256 i = 0; i < _lengthOfArray; ) {
-            _pairAddress = _addresses[i];
-            try ILightlendPair(_pairAddress).pause() {
-                _updatedAddresses[i] = _addresses[i];
-            } catch {}
+            ILightlendPair(_addresses[i]).pause();
+            _updatedAddresses[i] = _addresses[i];
             unchecked {
                 i = i + 1;
             }

@@ -239,7 +239,7 @@ async function liquidateAndMeasure(ctx, wethPrice, shares) {
         protocolCollateral: await pair.userCollateralBalance(pair.target),
         borrowerCollateral: await pair.userCollateralBalance(borrower.address),
         borrowerShares: await pair.userBorrowShares(borrower.address),
-        writeOff: await pair.cumulativeBadDebtWriteOff(),
+        writeOff: ev.args._amountToAdjust, // S5b: the bad-debt cap and its cumulative tracker are gone (ISO-02)
     };
 }
 
@@ -418,7 +418,10 @@ describe("S5a: liquidation fee and parameter validation", function () {
             await weth.connect(attacker2).approve(pair.target, ethers.MaxUint256);
             const shares = await pair.userBorrowShares(attacker.address);
             expect(shares).to.equal(weth18("3.5"));
-            await pair.connect(attacker2).liquidate(shares, (await time.latest()) + 3600, attacker.address);
+            const liqRc = await (
+                await pair.connect(attacker2).liquidate(shares, (await time.latest()) + 3600, attacker.address)
+            ).wait();
+            const liqEv = liqRc.logs.map((l) => pair.interface.parseLog(l)).find((l) => l && l.name === "Liquidate");
             // L = 3.5 * 2550 = 8925 USDC; L * 1.12 = 9996 < 10000 -> dirty: gross = L * 1.108 = 9888.9 USDC
             // bonus = 963.9; protocol fee = 1% of bonus = 9.639; liquidator gets 9879.261; 111.1 USDC remains.
             // A (wrong) clean branch would have sent all 10,000 USDC minus fee and left 0.
@@ -427,7 +430,7 @@ describe("S5a: liquidation fee and parameter validation", function () {
             expect(await pair.userCollateralBalance(attacker.address)).to.equal(111_100_000n);
             expect(await weth.balanceOf(attacker2.address)).to.equal(0n); // repaid exactly 3.5 WETH
             expect(await pair.userBorrowShares(attacker.address)).to.equal(0n);
-            expect(await pair.cumulativeBadDebtWriteOff()).to.equal(0n);
+            expect(liqEv.args._amountToAdjust).to.equal(0n); // no write-off on the dirty path
             await pair.connect(attacker).removeCollateral(111_100_000n, attacker.address);
             const usdcEnd = (await usdc.balanceOf(attacker.address)) + (await usdc.balanceOf(attacker2.address));
             // Attacker ends with 9990.361 USDC and no WETH: it lost exactly the protocol fee.
@@ -660,8 +663,9 @@ async function fxUsdcDebtAccrued() {
 }
 
 /// Liquidates and checks every amount against a BigInt model of LightlendPairCore.liquidate():
-/// interest accrued in the liquidation block first (flat rate), debt value rounded down for the quote,
-/// repayment rounded up, protocol fee (share of the bonus) rounded down, write-off per the existing cap.
+/// interest accrued in the liquidation block first (flat rate, plus the S5b remainder carry), debt value
+/// rounded down for the quote, repayment rounded up, protocol fee (share of the bonus) rounded down, and
+/// on the clean path a write-off of every remaining borrower share (S5b ISO-02: no cap).
 async function liquidateExact(m, { wethUsd, sharesOf, branch }) {
     const { pair, oracle, borrower, liquidator, assetToken, collateralToken } = m;
     await m.wethFeed.setAnswer((BigInt(wethUsd) * 10n ** 8n).toString());
@@ -673,8 +677,8 @@ async function liquidateExact(m, { wethUsd, sharesOf, branch }) {
     expect(tb.amount).to.not.equal(tb.shares); // fractional share price from accrued interest
     const coll = await pair.userCollateralBalance(borrower.address);
     const borrowerShares = await pair.userBorrowShares(borrower.address);
-    let cum = await pair.cumulativeBadDebtWriteOff();
-    const epochStart = await pair.badDebtEpochStart();
+    const carry = await pair.interestRemainder();
+    expect(carry).to.be.lt(E18);
     const protocol0 = await pair.userCollateralBalance(pair.target);
     const liqColl0 = await collateralToken.balanceOf(liquidator.address);
     const liqAsset0 = await assetToken.balanceOf(liquidator.address);
@@ -685,11 +689,10 @@ async function liquidateExact(m, { wethUsd, sharesOf, branch }) {
 
     // interest accrued by the liquidation's own _addInterest()
     const ts = BigInt(await time.latest()) + 100n;
-    const interest = ((ts - rateInfo.lastTimestamp) * tb.amount * m.flatRate) / E18;
+    const interest = ((ts - rateInfo.lastTimestamp) * tb.amount * m.flatRate + carry) / E18;
     expect(interest).to.be.gt(0n);
     const tb1 = { amount: tb.amount + interest, shares: tb.shares };
     const ta1 = { amount: ta.amount + interest, shares: ta.shares };
-    if (ts >= epochStart + 86_400n) cum = 0n;
 
     const s = sharesOf(borrowerShares);
     const L = (vaToAmount(tb1, s, false) * low) / E18; // debt value, rounded down
@@ -703,11 +706,7 @@ async function liquidateExact(m, { wethUsd, sharesOf, branch }) {
     let amountToAdjust = 0n;
     if (leftover <= 0n) {
         sharesToAdjust = borrowerShares - s;
-        if (sharesToAdjust > 0n) {
-            amountToAdjust = vaToAmount(tb1, sharesToAdjust, false);
-            const maxWriteOff = (ta1.amount * 500n) / 10_000n;
-            expect(amountToAdjust).to.be.lte(maxWriteOff - cum); // scenario stays under the write-off caps
-        }
+        if (sharesToAdjust > 0n) amountToAdjust = vaToAmount(tb1, sharesToAdjust, false);
     }
     const modelBranch = leftover > 0n ? "dirty" : sharesToAdjust > 0n ? "clean-writeoff" : "clean";
     expect(modelBranch).to.equal(branch);
@@ -729,7 +728,7 @@ async function liquidateExact(m, { wethUsd, sharesOf, branch }) {
     expect((await pair.userCollateralBalance(pair.target)) - protocol0).to.equal(fee);
     expect(await pair.userCollateralBalance(borrower.address)).to.equal(coll - gross);
     expect(await pair.userBorrowShares(borrower.address)).to.equal(borrowerShares - s - sharesToAdjust);
-    expect(await pair.cumulativeBadDebtWriteOff()).to.equal(cum + amountToAdjust);
+    if (leftover <= 0n) expect(await pair.userBorrowShares(borrower.address)).to.equal(0n); // ISO-02
     const tbAfter = va(await pair.totalBorrow());
     expect(tbAfter.amount).to.equal(tb1.amount - amountToAdjust - repay);
     expect(tbAfter.shares).to.equal(tb1.shares - s - sharesToAdjust);
@@ -941,9 +940,9 @@ describe("S5a round 1: Codex review fixes", function () {
             // repaid value far exceeds the collateral: clean path, all 4,000 USDC to the liquidator, no fee
             expect(await usdc.balanceOf(liquidator.address)).to.equal(usdc6("4000"));
             expect(await pair.userCollateralBalance(borrower.address)).to.equal(0n);
-            const left = await pair.userBorrowShares(borrower.address);
-            expect(left).to.be.lt(shares0 - 1000n); // part of the residual debt written off
-            expect(left).to.be.gt(0n); // partial: the write-off cap leaves the rest
+            // S5b ISO-02: no write-off cap any more, so the clean path writes off all residual debt
+            expect(shares0).to.be.gt(1000n);
+            expect(await pair.userBorrowShares(borrower.address)).to.equal(0n);
         });
     });
 
