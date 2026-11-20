@@ -235,6 +235,32 @@ async function main() {
     if (code === "0x" || ethers.keccak256(code) !== e.codehash) fail(`contracts.${key} ${e.address}: code does not match the manifest codehash`);
   }
   const safe = await checkSafe(m);
+
+  // Wiring invariant (plan.md), before any transaction: each pair's dual oracle (from
+  // oracle.dualOracles) has the pair's asset/collateral order, the manifest guard and sources.
+  const dualFor = {};
+  const sourceOf = (token) => [...m.oracle.coreSources, ...m.oracle.fixedSources].find((s) => eq(s.asset, token))?.address;
+  for (const spec of PAIRS) {
+    const asset = tokenOf[spec.asset];
+    const collateral = tokenOf[spec.collateral];
+    const duals = m.oracle.dualOracles.filter((d) => eq(d.asset, asset) && eq(d.collateral, collateral));
+    if (duals.length !== 1 || !duals[0].address) fail(`oracle.dualOracles needs exactly one deployed ${spec.name} dual oracle`);
+    const address = duals[0].address;
+    if (!eq(address, m.contracts[spec.dualKey].address)) fail(`oracle.dualOracles ${spec.name} is not contracts.${spec.dualKey}`);
+    const dual = new ethers.Contract(address, DUAL_ORACLE_ABI, ethers.provider);
+    const wiring = [
+      ["ASSET()", await dual.ASSET(), asset],
+      ["COLLATERAL()", await dual.COLLATERAL(), collateral],
+      ["GUARD()", await dual.GUARD(), m.contracts.priceGuard.address],
+      ["ASSET_PRICE_SOURCE()", await dual.ASSET_PRICE_SOURCE(), sourceOf(asset)],
+      ["COLLATERAL_PRICE_SOURCE()", await dual.COLLATERAL_PRICE_SOURCE(), sourceOf(collateral)],
+    ];
+    for (const [getter, actual, expected] of wiring) {
+      if (!eq(actual, expected)) fail(`${spec.name} dual oracle ${address} ${getter} is ${actual}, expected ${expected} (asset/collateral order)`);
+    }
+    dualFor[spec.key] = address;
+  }
+
   const deployer = await ethers.getSigner(m.deployer);
   const forbidden = [m.deployer, ...m.compromised, m.bots.keeper, m.bots.liquidator];
   const gasLog = [];
@@ -429,19 +455,7 @@ async function main() {
         protocolLiquidationFee: P.bpsTo1e5(mk.protocolLiquidationFeeShareBps),
       };
 
-      // Wiring invariant (plan.md): the dual oracle of this pair has the same asset/collateral order.
-      const duals = m.oracle.dualOracles.filter((d) => eq(d.asset, asset) && eq(d.collateral, collateral));
-      if (duals.length !== 1) fail(`oracle.dualOracles needs exactly one ${spec.name} dual oracle`);
-      const dualAddress = duals[0].address;
-      if (!eq(dualAddress, m.contracts[spec.dualKey].address)) fail(`oracle.dualOracles ${spec.name} is not contracts.${spec.dualKey}`);
-      const dual = new ethers.Contract(dualAddress, DUAL_ORACLE_ABI, ethers.provider);
-      expectEq(`${spec.name} dual oracle ASSET()`, await dual.ASSET(), asset);
-      expectEq(`${spec.name} dual oracle COLLATERAL()`, await dual.COLLATERAL(), collateral);
-      expectEq(`${spec.name} dual oracle GUARD()`, await dual.GUARD(), m.contracts.priceGuard.address);
-      const sourceOf = (token) =>
-        [...m.oracle.coreSources, ...m.oracle.fixedSources].find((s) => eq(s.asset, token))?.address;
-      expectEq(`${spec.name} dual oracle ASSET_PRICE_SOURCE()`, await dual.ASSET_PRICE_SOURCE(), sourceOf(asset));
-      expectEq(`${spec.name} dual oracle COLLATERAL_PRICE_SOURCE()`, await dual.COLLATERAL_PRICE_SOURCE(), sourceOf(collateral));
+      const dualAddress = dualFor[spec.key]; // order checked before any transaction
 
       let pairAddress = await existing(spec.key);
       if (pairAddress && !eq(mk.pair, pairAddress)) fail(`markets.isolated ${spec.name}.pair ${mk.pair} != contracts.${spec.key} ${pairAddress}`);
