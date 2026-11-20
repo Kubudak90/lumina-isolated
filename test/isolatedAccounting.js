@@ -180,35 +180,45 @@ describe("S5b: isolated accounting", function () {
         for (const firstOut of ["A", "B"]) {
             it(`PoC-B port: both lenders' shares are worth the same after the liquidation (${firstOut} withdraws first)`, async function () {
                 const ctx = await loadFixture(fxPocB);
-                const { pair, weth, lenderA, lenderB, borrower } = ctx;
+                const { pair, weth, lenderA, lenderB, borrower, liquidator } = ctx;
                 const { rc } = await pocBLiquidate(ctx);
                 const ev = parseEvent(pair, rc, "Liquidate");
-
-                // the borrower is gone: no collateral and no debt
-                expect(await pair.userCollateralBalance(borrower.address)).to.equal(0n);
-                expect(await pair.userBorrowShares(borrower.address)).to.equal(0n);
-                expect(ev.args._amountToAdjust).to.be.gt(weth18("0.7")); // ~0.79 WETH written off at once
+                const collLeft = await pair.userCollateralBalance(borrower.address);
+                const sharesLeft = await pair.userBorrowShares(borrower.address);
 
                 const aShares = await pair.balanceOf(lenderA.address);
-                const bShares = await pair.balanceOf(lenderB.address);
-                expect(aShares).to.equal(bShares);
+                expect(aShares).to.equal(await pair.balanceOf(lenderB.address));
                 const valueNow = await pair.toAssetAmount(aShares, false, false);
 
                 const [first, second] = firstOut === "A" ? [lenderA, lenderB] : [lenderB, lenderA];
                 await pair.connect(first).redeem(await pair.balanceOf(first.address), first.address, first.address);
                 const firstGot = await weth.balanceOf(first.address);
+                // As in PoC-B: with the old cap the rest of the debt could only be written off by later
+                // liquidate(0) calls (5% of assets per day). After ISO-02 nothing is left, so this never runs.
+                let laterWriteOffs = 0;
+                while ((await pair.userBorrowShares(borrower.address)) > 0n && laterWriteOffs < 40) {
+                    await time.increase(DAY);
+                    await pair.connect(liquidator).liquidate(0, (await time.latest()) + 3600, borrower.address);
+                    laterWriteOffs++;
+                }
                 await pair.connect(second).redeem(await pair.balanceOf(second.address), second.address, second.address);
                 const secondGot = await weth.balanceOf(second.address);
                 console.log(
                     `      ${firstOut} out first: first lender got ${ethers.formatUnits(firstGot, 18)} WETH,` +
-                        ` second got ${ethers.formatUnits(secondGot, 18)} WETH (both deposited 1.0)`
+                        ` second got ${ethers.formatUnits(secondGot, 18)} WETH (both deposited 1.0;` +
+                        ` ${laterWriteOffs} later write-offs)`
                 );
 
                 // equal within rounding, whichever leaves first; each carries half of the loss
-                expect(firstGot).to.be.closeTo(secondGot, 2n);
+                expect(secondGot).to.be.closeTo(firstGot, 2n);
                 expect(firstGot).to.be.closeTo(valueNow, 2n);
                 expect(firstGot).to.be.lt(weth18("0.61"));
                 expect(firstGot).to.be.gt(weth18("0.60"));
+                // the borrower was gone after the liquidation itself: no collateral and no debt
+                expect(laterWriteOffs).to.equal(0);
+                expect(collLeft).to.equal(0n);
+                expect(sharesLeft).to.equal(0n);
+                expect(ev.args._amountToAdjust).to.be.gt(weth18("0.7")); // ~0.79 WETH written off at once
             });
         }
 
@@ -217,9 +227,6 @@ describe("S5b: isolated accounting", function () {
             const { pair, lenderB } = ctx;
             await pocBLiquidate(ctx);
             const tb0 = va(await pair.totalBorrow());
-            // only the virtual-share rounding dust (~1e3 x (share price - 1) wei) is left, with no shares
-            expect(tb0.shares).to.equal(0n);
-            expect(tb0.amount).to.be.lte(1000n);
             const bValue0 = await pair.toAssetAmount(await pair.balanceOf(lenderB.address), false, false);
 
             await time.increase(365 * DAY);
@@ -230,7 +237,10 @@ describe("S5b: isolated accounting", function () {
             console.log(`      one year after the liquidation: totalBorrow ${tb0.amount} -> ${tb1.amount} wei`);
             // a year of interest on <= 1000 wei of dust: at most a few wei (the old code accrued on ~0.69 WETH)
             expect(tb1.amount - tb0.amount).to.be.lte(10n);
-            expect(bValue1 - bValue0).to.be.lte(10n);
+            expect(bValue1 - bValue0).to.be.lte(10n); // lenders' shares are not inflated by phantom interest
+            // only the virtual-share rounding dust (~1e3 x (share price - 1) wei) is left, with no shares
+            expect(tb0.shares).to.equal(0n);
+            expect(tb0.amount).to.be.lte(1000n);
         });
 
         it("exact totalBorrow / totalAsset deltas: every remaining share is written off in the same transaction", async function () {
