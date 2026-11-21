@@ -26,6 +26,6 @@
     "@mean-finance/uniswap-v3-oracle": "^1.0.3",
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "hardhat": "^2.22.8",
-    "solidity-bytes-utils": "^0.8.2"
+    "solidity-bytes-utils": "^0.8.4"
   }
 }
