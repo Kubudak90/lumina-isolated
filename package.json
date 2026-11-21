@@ -19,7 +19,7 @@
     "@openzeppelin/contracts": "4.9.6",
     "@rari-capital/solmate": "^6.4.0",
     "dotenv": "^16.0.2",
-    "prettier": "^3.3.3",
+    "prettier": "^3.10.1",
     "prettier-plugin-solidity": "^1.4.1"
   },
   "dependencies": {
