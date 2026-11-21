@@ -39,4 +39,6 @@ abstract contract LightlendPairConstants {
     error InvalidLiquidationFee();
     error InvalidProtocolFee();
     error InvalidSeedAmount();
+    error InsufficientLiquidatorBonus();
+    error MaxLTVTooHighForLiquidationFee();
 }

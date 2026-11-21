@@ -13,7 +13,7 @@ const setup = require("./utils/setup");
  * - pause cannot prevent debt reduction
  * - ERC-4626 deposit/mint/redeem/convert hold for 6-, 8- and 18-decimal assets
  * - liquidation cannot seize more collateral than the borrower posted
- * - bad-debt write-off is capped at MAX_BAD_DEBT_BPS
+ * - a clean liquidation leaves the borrower with no collateral and no debt (ISO-02: no write-off cap)
  */
 
 async function impersonate(addr) {
@@ -290,7 +290,9 @@ describe("Isolated pair invariants", function () {
             const seized = collateralBefore - (await wethPair.userCollateralBalance(user.address));
             expect(seized).to.be.lte(collateralBefore);
             expect(seized).to.be.gt(0n);
-            expect(await wethPair.MAX_BAD_DEBT_BPS()).to.equal(500n);
+            // ISO-02: the bad-debt cap is gone; a clean liquidation leaves nothing behind
+            expect(await wethPair.userCollateralBalance(user.address)).to.equal(0n);
+            expect(await wethPair.userBorrowShares(user.address)).to.equal(0n);
         });
     });
 

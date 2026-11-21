@@ -82,6 +82,9 @@ contract LightlendPairDeployer is Ownable {
     /// @notice List of the names of all deployed Pairs
     address[] public deployedPairsArray;
 
+    /// @notice True for every pair this deployer created; globalPause only acts on these (ISO-07)
+    mapping(address => bool) public isDeployedPair;
+
     function version() external pure returns (uint256 _major, uint256 _minor, uint256 _patch) {
         return (5, 0, 0);
     }
@@ -291,6 +294,7 @@ contract LightlendPairDeployer is Ownable {
         if (_pairAddress == address(0)) revert Create2Failed();
 
         deployedPairsArray.push(_pairAddress);
+        isDeployedPair[_pairAddress] = true;
 
         // Set additional values for LightlendPair
         ILightlendPair _lightlendPair = ILightlendPair(_pairAddress);
@@ -356,22 +360,33 @@ contract LightlendPairDeployer is Ownable {
     // ============================================================================================
 
     /// @notice The ```globalPause``` function calls the pause() function on a given set of pair addresses
-    /// @dev Ignores reverts when calling pause()
-    /// @param _addresses Addresses to attempt to pause()
-    /// @return _updatedAddresses Addresses for which pause() was successful
+    /// @dev ISO-07: all or nothing. Every address must be a pair this deployer created
+    ///      (isDeployedPair), checked before pause() is called; anything else (another deployer's pair,
+    ///      a non-pair contract, an address with no code) reverts with NotDeployedPair. If a pair's
+    ///      pause() reverts, the whole call reverts. After each pause() the pair's state is read back:
+    ///      borrow and deposit limits 0, withdraw and interest paused. A pair whose access control was
+    ///      revoked (pause() is then a partial no-op) reverts with PairNotPaused. A successful return
+    ///      therefore means every listed pair is paused. Pairs accept pause() from their DEPLOYER_ADDRESS.
+    /// @param _addresses Addresses to pause()
+    /// @return _updatedAddresses The paused addresses (always equal to `_addresses`)
     function globalPause(
         address[] memory _addresses
     ) external returns (address[] memory _updatedAddresses) {
         if (msg.sender != circuitBreakerAddress) revert CircuitBreakerOnly();
 
-        address _pairAddress;
         uint256 _lengthOfArray = _addresses.length;
         _updatedAddresses = new address[](_lengthOfArray);
         for (uint256 i = 0; i < _lengthOfArray; ) {
-            _pairAddress = _addresses[i];
-            try ILightlendPair(_pairAddress).pause() {
-                _updatedAddresses[i] = _addresses[i];
-            } catch {}
+            if (!isDeployedPair[_addresses[i]]) revert NotDeployedPair(_addresses[i]);
+            ILightlendPair _pair = ILightlendPair(_addresses[i]);
+            _pair.pause();
+            if (
+                _pair.borrowLimit() != 0 ||
+                _pair.depositLimit() != 0 ||
+                !_pair.isWithdrawPaused() ||
+                !_pair.isInterestPaused()
+            ) revert PairNotPaused(_addresses[i]);
+            _updatedAddresses[i] = _addresses[i];
             unchecked {
                 i = i + 1;
             }
@@ -383,6 +398,8 @@ contract LightlendPairDeployer is Ownable {
     // ============================================================================================
 
     error CircuitBreakerOnly();
+    error PairNotPaused(address pair);
+    error NotDeployedPair(address pair);
     error WhitelistedDeployersOnly();
     error Create2Failed();
     error MustSeedPair();

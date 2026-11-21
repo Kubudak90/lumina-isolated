@@ -26,3 +26,6 @@ scripts/deployments
 scripts/utils/verifications
 
 .vscode
+
+# Agent worktrees
+.worktrees/

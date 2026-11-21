@@ -38,11 +38,15 @@ contract LinearInterestRate is IRateCalculatorV2 {
         uint256 _vertexRate,
         uint256 _fullUtilizationRate
     ) {
+        // ISO-04: 0 < vertex < 100% keeps both slopes' divisors non-zero; monotonic rates keep the
+        // subtractions safe; FULL_UTIL_RATE <= uint64 max keeps every rate (<= FULL_UTIL_RATE) inside
+        // _toUint64, so getNewRate() (and with it the pair's _addInterest) can never revert.
         require(_vertexUtilization > 0 && _vertexUtilization < UTIL_PREC, "bad vertex util");
         require(
             _zeroUtilizationRate <= _vertexRate && _vertexRate <= _fullUtilizationRate,
             "rates not monotonic"
         );
+        require(_fullUtilizationRate <= type(uint64).max, "full util rate > uint64");
 
         suffix = _suffix;
         VERTEX_UTILIZATION = _vertexUtilization;
