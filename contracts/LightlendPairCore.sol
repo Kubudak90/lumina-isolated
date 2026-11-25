@@ -1052,7 +1052,7 @@ abstract contract LightlendPairCore is
 
     /// @notice The ```repayAsset``` function allows the caller to pay down the debt for a given borrower.
     /// @dev Caller must first invoke ```ERC20.approve()``` for the Asset Token contract
-    /// @param _shares The number of Borrow Shares which will be repaid by the call
+    /// @param _shares The number of Borrow Shares which will be repaid by the call, capped to the borrower's shares
     /// @param _borrower The account for which the debt will be reduced
     /// @return _amountToRepay The amount of Asset Tokens which were transferred in order to repay the Borrow Shares
     function repayAsset(
@@ -1063,6 +1063,12 @@ abstract contract LightlendPairCore is
 
         // Check if repay is paused revert if necessary
         if (isRepayPaused) revert RepayPaused();
+
+        // Cap to the borrower's shares: anyone can repay for anyone, so a repay-all built from an earlier
+        // read must not underflow after someone else repaid part of the debt first (audit N-ISO-01)
+        uint256 _borrowerShares = userBorrowShares[_borrower];
+        if (_shares > _borrowerShares) _shares = _borrowerShares;
+        if (_shares == 0) revert NothingToRepay();
 
         // Accrue interest if necessary
         _addInterest();
@@ -1102,7 +1108,7 @@ abstract contract LightlendPairCore is
 
     /// @notice The ```liquidate``` function allows a third party to repay a borrower's debt if they have become insolvent
     /// @dev Caller must invoke ```ERC20.approve``` on the Asset Token contract prior to calling ```Liquidate()```
-    /// @param _sharesToLiquidate The number of Borrow Shares repaid by the liquidator
+    /// @param _sharesToLiquidate The number of Borrow Shares repaid by the liquidator, capped to the borrower's shares
     /// @param _deadline The timestamp after which tx will revert
     /// @param _borrower The account for which the repayment is credited and from whom collateral will be taken
     /// @return _collateralForLiquidator The amount of Collateral Token transferred to the liquidator
@@ -1134,6 +1140,10 @@ abstract contract LightlendPairCore is
         VaultAccount memory _totalBorrow = totalBorrow;
         uint256 _userCollateralBalance = userCollateralBalance[_borrower];
         uint128 _borrowerShares = userBorrowShares[_borrower].toUint128();
+
+        // Cap to the borrower's shares before any calculation: a repay just before this call must not make
+        // an exact full liquidation revert (audit N-ISO-01). The event and the return value use the capped value.
+        if (_sharesToLiquidate > _borrowerShares) _sharesToLiquidate = _borrowerShares;
 
         // Prevent stack-too-deep
         int256 _leftoverCollateral;
@@ -1219,7 +1229,6 @@ abstract contract LightlendPairCore is
         }
 
         // Effects & Interactions
-        // NOTE: reverts if _shares > userBorrowShares
         _repayAsset(
             _totalBorrow,
             _amountLiquidatorToRepay,
