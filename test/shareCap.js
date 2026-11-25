@@ -18,7 +18,8 @@ const weth18 = (x) => ethers.parseUnits(x, 18);
 const E8 = 10n ** 8n;
 const U128_MAX = 2n ** 128n - 1n;
 const EIP170_LIMIT = 24_576;
-
+const YEAR = 365 * 86_400;
+const R10 = 3_170_979_198n; // ~10% APR per second, 1e18 precision
 
 async function fund(token, who, pair, amount) {
     await token.mint(who.address, amount);
@@ -39,11 +40,9 @@ function events(contract, rc, name) {
 
 /// Full deploy through LightlendPairDeployer with the launch fees (clean 5%, protocol 10% of the
 /// bonus): asset WETH (18 dec), collateral USDC (6 dec), WETH = $2,400. Lender: 10 WETH. Borrower:
-/// 0.7 WETH against 2,300 USDC (LTV 73.0%). A second, healthy borrower keeps other debt in the pair.
-/// Zero interest rate, so a static call and the mined call compute the same amounts.
-async function fixture() {
+/// 0.7 WETH against 2,300 USDC (LTV 73.0%). Repayers and the liquidator hold WETH and have approved.
+async function deployFunded(interestRate) {
     const core = await setup.deployCore();
-    const interestRate = await (await ethers.getContractFactory("LinearInterestRate")).deploy("zero", 80000, 0, 0, 0);
     const { mockTokens } = await setup.deployMockTokens(["USDC", "WETH"], [6, 18]);
     const usdc = mockTokens.USDC;
     const weth = mockTokens.WETH;
@@ -79,14 +78,31 @@ async function fixture() {
     await pair.connect(lender).deposit(weth18("10"), lender.address);
     await fund(usdc, borrower, pair, usdc6("2300"));
     await pair.connect(borrower).borrowAsset(weth18("0.7"), usdc6("2300"), borrower.address);
-    await fund(usdc, borrower2, pair, usdc6("10000"));
-    await pair.connect(borrower2).borrowAsset(weth18("1"), usdc6("10000"), borrower2.address);
-    // repayers and the liquidator hold WETH and have approved the pair
     await fund(weth, borrower, pair, weth18("1"));
     await fund(weth, other, pair, weth18("1"));
     await fund(weth, liquidator, pair, weth18("5"));
-    await time.increase(60);
     return { pair, usdc, weth, wethFeed, lender, borrower, liquidator, other, borrower2 };
+}
+
+/// Zero interest rate (shares == amounts); a second, healthy borrower keeps other debt in the pair.
+async function fixture() {
+    const interestRate = await (await ethers.getContractFactory("LinearInterestRate")).deploy("zero", 80000, 0, 0, 0);
+    const ctx = await deployFunded(interestRate);
+    const { pair, usdc, borrower2 } = ctx;
+    await fund(usdc, borrower2, pair, usdc6("10000"));
+    await pair.connect(borrower2).borrowAsset(weth18("1"), usdc6("10000"), borrower2.address);
+    await time.increase(60);
+    return ctx;
+}
+
+/// Review r1: the borrower is the pair's only borrower and a year of ~10% interest has accrued, so a
+/// share is worth ~1.1 wei and burning the last share leaves a residue (WriteOffResidualDebt).
+async function soleBorrowerFixture() {
+    const LIR = await ethers.getContractFactory("LinearInterestRate");
+    const ctx = await deployFunded(await LIR.deploy("flat10", 80000, R10, R10, R10));
+    await time.increase(YEAR);
+    await ctx.pair.addInterest(false);
+    return ctx;
 }
 
 const setWethUsd = (ctx, usd) => ctx.wethFeed.setAnswer((usd * E8).toString());
@@ -109,16 +125,28 @@ async function pairState(ctx) {
     };
 }
 
+/// Static call evaluated in the next block at timestamp `at`, then the same call mined at `at`, so
+/// the quoted return value is exactly what the transaction returned (also with interest accruing).
+async function quoteAndSend(fn, args, at) {
+    await time.setNextBlockTimestamp(at);
+    const quoted = await fn.staticCall(...args, { blockTag: "pending" });
+    await time.setNextBlockTimestamp(at);
+    const rc = await (await fn(...args)).wait();
+    expect((await ethers.provider.getBlock(rc.blockNumber)).timestamp).to.equal(at);
+    return { quoted, rc };
+}
+
 /// Sends liquidate(shareArg) at timestamp `at` and returns the event args, state and return value.
 async function liquidateAt(ctx, shareArg, at) {
     const { pair, borrower, liquidator } = ctx;
     const dl = BigInt(at) + 3600n;
-    await time.setNextBlockTimestamp(at);
-    const rc = await (await pair.connect(liquidator).liquidate(shareArg, dl, borrower.address)).wait();
+    const { quoted, rc } = await quoteAndSend(pair.connect(liquidator).liquidate, [shareArg, dl, borrower.address], at);
     const [liq] = events(pair, rc, "Liquidate");
     const [repay] = events(pair, rc, "RepayAsset");
     const writeOff = events(pair, rc, "WriteOffResidualDebt").map((e) => e.args.amount);
+    expect(quoted, "liquidate() return value").to.equal(liq.args._collateralForLiquidator);
     return {
+        returned: quoted,
         liquidate: liq.args.toArray(),
         repay: repay.args.toArray(),
         writeOff,
@@ -285,6 +313,125 @@ describe("F3: share arguments are capped to the borrower's shares (N-ISO-01)", f
             expect(partial.liquidate[6]).to.be.greaterThan(0n); // _amountToAdjust
             expect(partial.state.borrowerShares).to.equal(0n);
         });
+
+        // Review r1, item 1: the cap clamps a partial clean-path liquidation.
+        for (const [outcome, repaid, path] of [
+            ["stays on the clean path", weth18("0.05"), "clean"], // 0.65 x 3,400 x 1.05 = 2,320.5 >= 2,300 USDC
+            ["flips from the clean to the dirty path", weth18("0.07"), "dirty"], // 0.63 x 3,400 x 1.05 = 2,249.1 < 2,300
+        ]) {
+            it(`a partial clean-path liquidate() above what a third party's repay left is capped and ${outcome}`, async function () {
+                const ctx = await loadFixture(fixture);
+                const { pair, borrower, other } = ctx;
+                await setWethUsd(ctx, 3400n);
+                const n = await shares(ctx, borrower);
+                const s = n - n / 20n; // what the liquidator planned: a clean partial that writes off n/20
+
+                const at = (await time.latest()) + 10;
+                const planned = await snapshotRun(() => liquidateAt(ctx, s, at));
+                expect(planned.liquidate[5]).to.equal(n / 20n); // _sharesToAdjust
+                expect(planned.state.borrowerCollateral).to.equal(0n); // clean
+
+                await pair.connect(other).repayAsset(repaid, borrower.address); // zero interest: shares == amount
+                const left = await shares(ctx, borrower);
+                expect(left).to.equal(n - repaid);
+                expect(left).to.be.lessThan(s);
+
+                const at2 = (await time.latest()) + 10;
+                const capped = await snapshotRun(() => liquidateAt(ctx, s, at2));
+                const exact = await snapshotRun(() => liquidateAt(ctx, left, at2));
+                expect(capped).to.deep.equal(exact);
+                expect(capped.liquidate[2]).to.equal(left); // _sharesToLiquidate: capped
+                expect(capped.liquidate[5]).to.equal(0n); // _sharesToAdjust: no underflow, nothing written off
+                expect(capped.liquidate[6]).to.equal(0n); // _amountToAdjust
+                expect(capped.writeOff).to.deep.equal([]);
+                expect(capped.state.borrowerShares).to.equal(0n);
+                if (path === "clean") expect(capped.state.borrowerCollateral).to.equal(0n);
+                else expect(capped.state.borrowerCollateral).to.be.greaterThan(0n);
+            });
+        }
+    });
+
+    // Review r1, item 2: shares != amounts, and the capped call burns the pair's last borrow share.
+    describe("sole borrower with accrued interest: a capped call burns the last share", function () {
+        async function check(ctx, { payer, send, expectRepaid }) {
+            const { pair, weth, borrower } = ctx;
+            const tb0 = await pair.totalBorrow();
+            const n = await shares(ctx, borrower);
+            expect(tb0[1], "sole borrower").to.equal(n);
+            expect(tb0[0], "a share is worth more than 1 wei").to.be.greaterThan(tb0[1] + tb0[1] / 20n);
+
+            await pair.connect(ctx.other).repayAsset(1n, borrower.address); // the third party's 1-share repay
+            const at = (await time.latest()) + 10;
+            const [ta1, tb1] = [await pair.totalAsset(), await pair.totalBorrow()];
+            const [cash1, payer1] = [await weth.balanceOf(pair.target), await weth.balanceOf(payer.address)];
+            const { quoted, rc } = await send(n, at);
+
+            const [repay] = events(pair, rc, "RepayAsset");
+            const [interest] = events(pair, rc, "AddInterest");
+            const writeOffs = events(pair, rc, "WriteOffResidualDebt");
+            const earned = interest ? interest.args.interestEarned : 0n;
+            const repaid = repay.args.amountToRepay;
+            expect(repay.args.shares).to.equal(n - 1n); // capped
+            expect(await shares(ctx, borrower)).to.equal(0n);
+            expectRepaid(rc, quoted, repaid);
+            expect(payer1 - (await weth.balanceOf(payer.address)), "payer's WETH").to.equal(repaid);
+            expect((await weth.balanceOf(pair.target)) - cash1, "pair's WETH").to.equal(repaid);
+
+            // the residue no share represents is written off, and nothing is left borrowed
+            expect(writeOffs.length).to.equal(1);
+            const residue = writeOffs[0].args.amount;
+            expect(residue).to.be.greaterThan(0n);
+            const [ta2, tb2] = [await pair.totalAsset(), await pair.totalBorrow()];
+            expect([tb2[0], tb2[1]]).to.deep.equal([0n, 0n]);
+            expect(tb1[0] + earned).to.equal(repaid + residue);
+            expect(ta2[0]).to.equal(ta1[0] + earned - residue);
+            expect(ta2[0], "totalAsset = cash once nothing is borrowed").to.equal(await weth.balanceOf(pair.target));
+            return { repay, residue };
+        }
+
+        for (const arg of ["n", "max"]) {
+            it(`repayAsset(${arg === "n" ? "n" : "type(uint256).max"}) after a third party's 1-share repay`, async function () {
+                const ctx = await loadFixture(soleBorrowerFixture);
+                const { pair, borrower } = ctx;
+                await check(ctx, {
+                    payer: borrower,
+                    send: (n, at) =>
+                        quoteAndSend(pair.connect(borrower).repayAsset, [arg === "n" ? n : ethers.MaxUint256, borrower.address], at),
+                    expectRepaid: (rc, quoted, repaid) => expect(quoted, "repayAsset() return value").to.equal(repaid),
+                });
+            });
+        }
+
+        for (const [path, wethUsd] of [
+            ["dirty", 2400n], // LTV ~80% after a year of interest
+            ["clean", 3400n], // under water
+        ]) {
+            it(`liquidate(n) on the ${path} path after a third party's 1-share repay`, async function () {
+                const ctx = await loadFixture(soleBorrowerFixture);
+                const { pair, usdc, borrower, liquidator } = ctx;
+                await setWethUsd(ctx, wethUsd);
+                const usdc1 = await usdc.balanceOf(liquidator.address);
+                let collateral;
+                await check(ctx, {
+                    payer: liquidator,
+                    send: (n, at) =>
+                        quoteAndSend(pair.connect(liquidator).liquidate, [n, BigInt(at) + 3600n, borrower.address], at),
+                    expectRepaid: (rc, quoted, repaid) => {
+                        const [liq] = events(pair, rc, "Liquidate");
+                        const [repay] = events(pair, rc, "RepayAsset");
+                        expect(liq.args._sharesToLiquidate).to.equal(repay.args.shares); // capped
+                        expect(liq.args._sharesToAdjust).to.equal(0n);
+                        expect(liq.args._amountToAdjust).to.equal(0n);
+                        expect(liq.args._amountLiquidatorToRepay).to.equal(repaid);
+                        expect(quoted, "liquidate() return value").to.equal(liq.args._collateralForLiquidator);
+                        collateral = quoted;
+                    },
+                });
+                expect((await usdc.balanceOf(liquidator.address)) - usdc1, "liquidator's USDC").to.equal(collateral);
+                if (path === "clean") expect(await pair.userCollateralBalance(borrower.address)).to.equal(0n);
+                else expect(await pair.userCollateralBalance(borrower.address)).to.be.greaterThan(0n);
+            });
+        }
     });
 
     it(`LightlendPair deployed bytecode stays under the EIP-170 limit (${EIP170_LIMIT} bytes)`, async function () {
