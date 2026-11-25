@@ -34,6 +34,29 @@ function ratePerSecToAprPercent(rate) {
 
 const UTIL_PREC = 100_000n; // VariableInterestRate / LightlendPairConstants.UTIL_PREC
 const RATE_PREC = 10n ** 18n;
+const TX_GAS_CAP = 16_777_216n; // EIP-7825 (Fusaka) per-transaction gas cap, 2^24
+const GAS_BUFFER_PERCENT = 25n;
+// AF1/F2: LighterDualOracle._callGuard forwards GUARD_CALL_GAS when the guard is not OK;
+// callers that refresh a pair's exchange rate (including pair creation) add GUARD_CALL_GAS +
+// GUARD_GAS_BUFFER so a tx estimated when the guard is OK still succeeds if the guard flips.
+const GUARD_CALL_GAS = 1_000_000n;
+const GUARD_GAS_BUFFER = 100_000n;
+
+/**
+ * Explicit gas limit: estimate + 25% + extraGas, capped at min(blockGasLimit, TX_GAS_CAP).
+ * Throws if estimate + extraGas already exceeds the cap.
+ */
+function boundedGas(estimate, blockGasLimit, { extraGas = 0n } = {}) {
+  const est = BigInt(estimate);
+  const extra = BigInt(extraGas);
+  const blockLimit = BigInt(blockGasLimit);
+  const cap = blockLimit < TX_GAS_CAP ? blockLimit : TX_GAS_CAP;
+  if (est + extra > cap) {
+    throw new Error(`gas estimate ${est}${extra ? ` + extra ${extra}` : ""} exceeds the per-transaction cap ${cap}; split the step`);
+  }
+  const buffered = est + (est * GAS_BUFFER_PERCENT) / 100n + extra;
+  return buffered > cap ? cap : buffered;
+}
 
 const RATE_CALCULATOR = Object.freeze({
   suffix: "Lighter devnet 0% | 25-100% full (start 50%) | vertex 80% @ 10% | target 70-85% | 2d",
@@ -179,10 +202,15 @@ async function simulateRates(calculator, c = RATE_CALCULATOR, startFullRate = PA
 module.exports = {
   SECONDS_PER_YEAR,
   UTIL_PREC,
+  TX_GAS_CAP,
+  GAS_BUFFER_PERCENT,
+  GUARD_CALL_GAS,
+  GUARD_GAS_BUFFER,
   RATE_CALCULATOR,
   PAIR,
   aprBpsToRatePerSec,
   ratePerSecToAprPercent,
+  boundedGas,
   rateCalculatorArgs,
   rateCalculatorImmutables,
   bpsTo1e5,

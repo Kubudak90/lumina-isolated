@@ -2,6 +2,9 @@
 pragma solidity >=0.8.19;
 
 interface ILightlendPair {
+    /// @notice `repayAsset` was called for a borrower without borrow shares, or with zero shares
+    error NothingToRepay();
+
     function CIRCUIT_BREAKER_ADDRESS() external view returns (address);
 
     function COMPTROLLER_ADDRESS() external view returns (address);
