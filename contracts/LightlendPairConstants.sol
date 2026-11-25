@@ -22,6 +22,7 @@ abstract contract LightlendPairConstants {
 
     error Insolvent(uint256 _borrow, uint256 _collateral, uint256 _exchangeRate);
     error BorrowerSolvent();
+    error NothingToRepay();
     error InsufficientAssetsInContract(uint256 _assets, uint256 _request);
     error SlippageTooHigh(uint256 _minOut, uint256 _actual);
     error BadSwapper();
