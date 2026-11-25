@@ -179,13 +179,14 @@ function crashPoint(when, step) {
 }
 
 class ManifestFile {
-  constructor(loader, file) {
+  constructor(loader, file, signerSet) {
     this.loader = loader;
     this.file = file;
+    this.signerSet = signerSet;
     this.text = fs.readFileSync(file, "utf8");
     this.data = JSON.parse(this.text);
     // Validate the file as it is (template or deployed) through the shared loader.
-    this.loader.loadManifest({ env: this.data.environment, path: file, strict: false });
+    this.loader.loadManifest({ env: this.data.environment, path: file, strict: false, signerSet });
   }
 
   /** Validates and writes atomically, only if something changed (a no-op run leaves the bytes). */
@@ -193,7 +194,7 @@ class ManifestFile {
     const text = serialize(this.data);
     if (text === this.text) return false;
     if (EXPECT_NOOP) fail(`no-op mode: the manifest ${this.file} would change`);
-    this.loader.validateManifest(this.data, { strict: false });
+    this.loader.validateManifest(this.data, { strict: false, signerSet: this.signerSet });
     const tmp = `${this.file}.tmp-${process.pid}`;
     fs.writeFileSync(tmp, text);
     fs.renameSync(tmp, this.file);
@@ -206,12 +207,13 @@ async function codeOf(address) {
   return address ? ethers.provider.getCode(address) : "0x";
 }
 
-async function boundedGas(estimate) {
+async function boundedGas(estimate, extraGas = 0n) {
   const block = await ethers.provider.getBlock("latest");
-  const cap = block.gasLimit < TX_GAS_CAP ? block.gasLimit : TX_GAS_CAP;
-  if (estimate > cap) fail(`gas estimate ${estimate} exceeds the per-transaction cap ${cap}; split the step`);
-  const buffered = estimate + (estimate * GAS_BUFFER_PERCENT) / 100n;
-  return buffered > cap ? cap : buffered;
+  try {
+    return P.boundedGas(estimate, block.gasLimit, { extraGas });
+  } catch (err) {
+    fail(err.message);
+  }
 }
 
 function sameSet(a, b) {
@@ -324,14 +326,23 @@ async function main() {
   const checkpointPath = process.env.LUMINA_DEPLOY_CHECKPOINT;
   if (!checkpointPath || !fs.existsSync(checkpointPath)) fail("set LUMINA_DEPLOY_CHECKPOINT to the deploy checkpoint (with the S4c Safe probe)");
   const { loader, checks } = await loadMonorepoModules();
-  const mf = new ManifestFile(loader, path.resolve(manifestPath));
+  const signerSet = loader.resolveSignerSet();
+  const mf = new ManifestFile(loader, path.resolve(manifestPath), signerSet);
   const m = mf.data;
   const checkpoint = new R.Checkpoint(path.resolve(checkpointPath), { noop: EXPECT_NOOP });
 
   // ---- chain: from the manifest, refused on mismatch
   const network = await ethers.provider.getNetwork();
   if (BigInt(m.chainId) !== network.chainId) fail(`manifest chainId ${m.chainId} != RPC chain ${network.chainId} (network ${hre.network.name})`);
-  if (TEST_CRASH && !/^anvil\//i.test(await ethers.provider.send("web3_clientVersion", []))) fail("LUMINA_ISOLATED_TEST_CRASH is only accepted on an anvil node");
+  if (signerSet === "harness" || TEST_CRASH) {
+    const clientVersion = await ethers.provider.send("web3_clientVersion", []);
+    if (signerSet === "harness" && !(typeof clientVersion === "string" && clientVersion.startsWith("anvil/"))) {
+      fail(`signer set "harness" is refused on non-anvil RPC (web3_clientVersion is ${JSON.stringify(clientVersion)}, expected prefix "anvil/")`);
+    }
+    if (TEST_CRASH && !(typeof clientVersion === "string" && /^anvil\//i.test(clientVersion))) {
+      fail("LUMINA_ISOLATED_TEST_CRASH is only accepted on an anvil node");
+    }
+  }
   console.log(`deploy-lighter-isolated (${phase}${EXPECT_NOOP ? ", no-op mode" : ""}): ${m.environment} (chain ${m.chainId}), manifest ${mf.file}`);
 
   // ---- inputs from the core and oracle deploys, checked on-chain before any transaction
@@ -437,7 +448,7 @@ async function main() {
    * Dry run (estimate, eth_call with the exact limit), cap check, write-ahead record, send with that
    * nonce, receipt check. `keep`: the record stays until the caller publishes the result.
    */
-  const send = async (step, label, contract, method, args = [], { keep = false, expectAddress = false } = {}) => {
+  const send = async (step, label, contract, method, args = [], { keep = false, expectAddress = false, extraGas = 0n } = {}) => {
     if (EXPECT_NOOP) fail(`no-op mode: refusing to send ${label}`);
     if (RECOVER_ONLY) throw new RecoverOnlyStop(label);
     beforeSend();
@@ -448,7 +459,7 @@ async function main() {
     const c = contract.connect(deployer);
     const fn = c.getFunction(method);
     const data = c.interface.encodeFunctionData(method, args);
-    const gasLimit = await boundedGas(await fn.estimateGas(...args));
+    const gasLimit = await boundedGas(await fn.estimateGas(...args), extraGas);
     const simulated = await fn.staticCall(...args, { gasLimit });
     const rec = { ...(await baseRecord(step, label)), kind: "call", to: target, dataHash: ethers.keccak256(data) };
     if (expectAddress) rec.expectedAddress = ethers.getAddress(simulated);
@@ -727,7 +738,16 @@ async function main() {
       const collateral = tokenOf[spec.collateral];
       if (!eq(mk.asset, asset) || !eq(mk.collateral, collateral)) fail(`markets.isolated ${spec.name}: asset/collateral differ from the assets`);
       if (mk.seedAmount === null) fail(`markets.isolated ${spec.name}.seedAmount must be set (the pair seed)`);
+      if (mk.depositLimit === null || mk.borrowLimit === null) {
+        fail(`markets.isolated ${spec.name}.depositLimit and borrowLimit must be set (F4 committed limits)`);
+      }
       const seed = BigInt(mk.seedAmount);
+      const depositLimit = BigInt(mk.depositLimit);
+      const borrowLimit = BigInt(mk.borrowLimit);
+      if (!(depositLimit > 0n && depositLimit < ethers.MaxUint256) || !(borrowLimit > 0n && borrowLimit < ethers.MaxUint256)) {
+        fail(`markets.isolated ${spec.name}: depositLimit and borrowLimit must be bounded (0 < limit < type(uint256).max)`);
+      }
+      if (depositLimit < seed) fail(`markets.isolated ${spec.name}: depositLimit ${depositLimit} < seedAmount ${seed}`);
       const launch = {
         maxLTV: P.bpsTo1e5(mk.maxLtvBps),
         cleanLiquidationFee: P.bpsTo1e5(mk.cleanLiquidationFeeBps),
@@ -767,7 +787,13 @@ async function main() {
           fullUtilizationRate: P.PAIR.fullUtilizationRate,
           ...launch,
         });
-        creation = await send(step, `LightlendPairDeployer.deploy(${spec.name})`, pd, "deploy", [configData], { keep: true, expectAddress: true });
+        // AF1/F2: the pair constructor refreshes the exchange rate; when the guard is not OK,
+        // LighterDualOracle requires GUARD_CALL_GAS (1,000,000) forwarded on top of the pair's gas.
+        creation = await send(step, `LightlendPairDeployer.deploy(${spec.name})`, pd, "deploy", [configData], {
+          keep: true,
+          expectAddress: true,
+          extraGas: P.GUARD_CALL_GAS + P.GUARD_GAS_BUFFER,
+        });
         pairAddress = checkpoint.pending.expectedAddress;
         how = "created";
         pendingStep = step;
@@ -849,9 +875,8 @@ async function main() {
       m.contracts[spec.key].address = pairAddress;
       m.contracts[spec.key].codehash = ethers.keccak256(code);
       mk.pair = pairAddress;
-      mk.maxLtvBps = P.e5ToBps(onChain.maxLTV, `${spec.name} maxLTV`);
-      mk.cleanLiquidationFeeBps = P.e5ToBps(onChain.cleanLiquidationFee, `${spec.name} cleanLiquidationFee`);
-      mk.protocolLiquidationFeeShareBps = P.e5ToBps(onChain.protocolLiquidationFee, `${spec.name} protocolLiquidationFee`);
+      // F6: manifest risk parameters (maxLtvBps, cleanLiquidationFeeBps, protocolLiquidationFeeShareBps,
+      // seedAmount, depositLimit, borrowLimit) stay from the committed input, never from chain reads.
       mk.params = {
         dualOracle: ethers.getAddress(rateInfo.oracle),
         maxOracleDeviation1e5: Number(onChain.maxOracleDeviation),
@@ -909,8 +934,11 @@ async function main() {
       if (eq(await c.pendingOwner(), safe)) next.push(`${label}(${c.target}).acceptOwnership()`);
     }
     for (const spec of PAIRS) {
+      const mk = m.markets.isolated.find((x) => x.name === spec.name);
       const pair = pairAt(m.contracts[spec.key].address);
       if (!(await pair.deployerSwapperRevoked())) next.push(`${spec.name} pair(${pair.target}).revokeDeployerSwapperAccess()`);
+      if ((await pair.depositLimit()) !== BigInt(mk.depositLimit)) next.push(`${spec.name} pair(${pair.target}).setDepositLimit(${mk.depositLimit}) (Safe MultiSend finalize)`);
+      if ((await pair.borrowLimit()) !== BigInt(mk.borrowLimit)) next.push(`${spec.name} pair(${pair.target}).setBorrowLimit(${mk.borrowLimit}) (Safe MultiSend finalize)`);
     }
     save();
     if (next.length) console.log(`NEXT (Safe ${safe}, then LUMINA_ISOLATED_PHASE=finalize):\n  ${next.join("\n  ")}`);
@@ -965,6 +993,7 @@ async function main() {
       if (await registry.deployers(a)) problems.push(`${a} is a LightlendPairRegistry deployer`);
     }
     for (const spec of PAIRS) {
+      const mk = m.markets.isolated.find((x) => x.name === spec.name);
       const pair = new ethers.Contract(c[spec.key].address, pairAbi, ethers.provider);
       check(`${spec.name} owner()`, await pair.owner(), expected.pairOwner);
       check(`${spec.name} pendingOwner()`, await pair.pendingOwner(), ZERO);
@@ -972,8 +1001,22 @@ async function main() {
       check(`${spec.name} pendingTimelockAddress()`, await pair.pendingTimelockAddress(), ZERO);
       check(`${spec.name} circuitBreakerAddress()`, await pair.circuitBreakerAddress(), expected.pairCircuitBreaker);
       if (!(await pair.deployerSwapperRevoked())) problems.push(`${spec.name} deployerSwapperRevoked() is false (the Safe must call revokeDeployerSwapperAccess)`);
+      // F4: depositLimit and borrowLimit set by the Safe MultiSend finalize batch, and totals within them.
+      if (mk?.depositLimit == null || mk?.borrowLimit == null) {
+        problems.push(`${spec.name}: manifest depositLimit/borrowLimit not set`);
+      } else {
+        const wantDeposit = BigInt(mk.depositLimit);
+        const wantBorrow = BigInt(mk.borrowLimit);
+        const gotDeposit = await pair.depositLimit();
+        const gotBorrow = await pair.borrowLimit();
+        if (gotDeposit !== wantDeposit) problems.push(`${spec.name} depositLimit() is ${gotDeposit}, expected ${wantDeposit} (run the Safe MultiSend finalize batch first)`);
+        if (gotBorrow !== wantBorrow) problems.push(`${spec.name} borrowLimit() is ${gotBorrow}, expected ${wantBorrow} (run the Safe MultiSend finalize batch first)`);
+        const [totalAssetAmount, , totalBorrowAmount] = await pair.getPairAccounting();
+        if (totalAssetAmount > wantDeposit) problems.push(`${spec.name} totalAssetAmount ${totalAssetAmount} exceeds depositLimit ${wantDeposit}`);
+        if (totalBorrowAmount > wantBorrow) problems.push(`${spec.name} totalBorrowAmount ${totalBorrowAmount} exceeds borrowLimit ${wantBorrow}`);
+      }
       // Leverage paths stay closed: no swapper approved since the pair's creation (as the deploy phase).
-      const creationTx = m.markets.isolated.find((x) => x.name === spec.name)?.params?.creationTx;
+      const creationTx = mk?.params?.creationTx;
       const creation = creationTx ? await ethers.provider.getTransactionReceipt(creationTx) : null;
       if (!creation || creation.status !== 1) {
         problems.push(`${spec.name}: no recorded creation transaction (markets.isolated params.creationTx)`);

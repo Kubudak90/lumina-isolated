@@ -7,6 +7,7 @@ const { ethers, artifacts } = require("hardhat");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 const P = require("../scripts/lighter/isolated-params");
+const setup = require("./utils/setup");
 
 const TWO_DAYS = 172_800;
 const U64_MAX = 2n ** 64n - 1n;
@@ -206,6 +207,103 @@ describe("Lighter isolated deploy (S5c)", function () {
             expect(await pair.depositLimit()).to.equal(ethers.MaxUint256);
             expect(await pair.isWithdrawPaused()).to.equal(false);
             expect(await pair.isInterestPaused()).to.equal(false);
+        });
+
+        it("F4 limits: Safe sets depositLimit/borrowLimit, deposits and borrows above them revert, unpause resets to MaxUint256", async function () {
+            const f = await loadFixture(deployStack);
+            const { pd, timelock, usdc, weth, safe, lender, borrower, deployer, calc } = f;
+            // Use a 0-deviation DualOracle (MockOracle has >3x low/high spread) so borrowAsset reaches borrowLimit.
+            const usdcFeed = await setup.deployMockChainlinkOracle("100000000");
+            const wethFeed = await setup.deployMockChainlinkOracle("300000000000");
+            const { oracle: zeroDevOracle } = await setup.deployOracle({
+                baseToken: usdc.target,
+                quoteToken: weth.target,
+                chainlinkMultiplyAddress: usdcFeed.target,
+                chainlinkDivideAddress: wethFeed.target,
+                maxOracleDelay: "1000000",
+                timelockAddress: timelock.target,
+                name: "f4-limits",
+            });
+            const configData = P.encodePairConfig(ethers.AbiCoder.defaultAbiCoder(), {
+                asset: usdc.target,
+                collateral: weth.target,
+                oracle: zeroDevOracle.target,
+                maxOracleDeviation: P.PAIR.maxOracleDeviation,
+                rateContract: calc.target,
+                fullUtilizationRate: P.PAIR.fullUtilizationRate,
+                maxLTV: P.bpsTo1e5(SPEC.maxLtvBps),
+                cleanLiquidationFee: P.bpsTo1e5(SPEC.cleanLiquidationFeeBps),
+                protocolLiquidationFee: P.bpsTo1e5(SPEC.protocolLiquidationFeeShareBps),
+            });
+            await usdc.mint(deployer.address, SEED);
+            await usdc.transfer(pd.target, SEED);
+            const receipt = await (await pd.deploy(configData)).wait();
+            const ev = receipt.logs.map((l) => pd.interface.parseLog(l)).find((e) => e?.name === "LogDeploy");
+            const pair = await ethers.getContractAt("LightlendPair", ev.args.address_);
+
+            const depositLimit = 150_000_000_000n; // 150,000 USDC
+            const borrowLimit = 75_000_000_000n;   // 75,000 USDC
+
+            // Deployer (non-owner) cannot set limits
+            await expect(pair.connect(deployer).setDepositLimit(depositLimit)).to.be.revertedWithCustomError(pair, "OnlyTimelockOrOwner");
+            await expect(pair.connect(deployer).setBorrowLimit(borrowLimit)).to.be.revertedWithCustomError(pair, "OnlyTimelockOrOwner");
+
+            // Safe sets both limits
+            await pair.connect(safe).setDepositLimit(depositLimit);
+            await pair.connect(safe).setBorrowLimit(borrowLimit);
+            expect(await pair.depositLimit()).to.equal(depositLimit);
+            expect(await pair.borrowLimit()).to.equal(borrowLimit);
+
+            // Deposit above depositLimit reverts ExceedsDepositLimit
+            const overDeposit = depositLimit - SEED + 1n;
+            await usdc.mint(lender.address, overDeposit);
+            await usdc.connect(lender).approve(pair.target, overDeposit);
+            await expect(pair.connect(lender).deposit(overDeposit, lender.address)).to.be.revertedWithCustomError(pair, "ExceedsDepositLimit");
+
+            // Deposit up to depositLimit succeeds
+            const okDeposit = depositLimit - SEED;
+            await pair.connect(lender).deposit(okDeposit, lender.address);
+
+            // Borrow above borrowLimit reverts ExceedsBorrowLimit (with ample collateral)
+            const hugeCollateral = ethers.parseEther("1000");
+            await weth.mint(borrower.address, hugeCollateral);
+            await weth.connect(borrower).approve(pair.target, hugeCollateral);
+            await pair.connect(borrower).addCollateral(hugeCollateral, borrower.address);
+            await expect(pair.connect(borrower).borrowAsset(borrowLimit + 1n, 0n, borrower.address)).to.be.revertedWithCustomError(pair, "ExceedsBorrowLimit");
+
+            // Borrow at borrowLimit succeeds
+            await pair.connect(borrower).borrowAsset(borrowLimit, 0n, borrower.address);
+            const [totalAssets, , totalBorrows] = await pair.getPairAccounting();
+            expect(totalAssets).to.be.lte(depositLimit);
+            expect(totalBorrows).to.be.lte(borrowLimit);
+
+            // globalPause + Timelock unpause resets limits to MaxUint256, requiring Safe to re-apply
+            await pd.connect(safe).globalPause([pair.target]);
+            const eta = BigInt(await time.latest()) + BigInt(TWO_DAYS) + 10n;
+            await timelock.connect(safe).queueTransaction(pair.target, 0, "unpause()", "0x", eta);
+            await time.setNextBlockTimestamp(eta);
+            await timelock.connect(safe).executeTransaction(pair.target, 0, "unpause()", "0x", eta);
+            expect(await pair.depositLimit()).to.equal(ethers.MaxUint256);
+            expect(await pair.borrowLimit()).to.equal(ethers.MaxUint256);
+            await pair.connect(safe).setDepositLimit(depositLimit);
+            await pair.connect(safe).setBorrowLimit(borrowLimit);
+            expect(await pair.depositLimit()).to.equal(depositLimit);
+            expect(await pair.borrowLimit()).to.equal(borrowLimit);
+        });
+    });
+
+    describe("AF1/F2 explicit gas helper (boundedGas)", function () {
+        it("adds 25% buffer by default and adds GUARD_CALL_GAS + GUARD_GAS_BUFFER when requested", function () {
+            expect(P.GUARD_CALL_GAS).to.equal(1_000_000n);
+            expect(P.GUARD_GAS_BUFFER).to.equal(100_000n);
+            expect(P.boundedGas(1_000_000n, 17_000_000n)).to.equal(1_250_000n);
+            // Pair deploy / liquidate with guard stipend: >= estimate + 1_100_000
+            const withStipend = P.boundedGas(300_000n, 17_000_000n, { extraGas: P.GUARD_CALL_GAS + P.GUARD_GAS_BUFFER });
+            expect(withStipend).to.equal(375_000n + 1_100_000n);
+            // Capped at EIP-7825 TX_GAS_CAP (16_777_216) when buffered exceeds cap but estimate + extraGas fits
+            expect(P.boundedGas(15_000_000n, 17_000_000n, { extraGas: 1_100_000n })).to.equal(P.TX_GAS_CAP);
+            // Throws when estimate + extraGas itself exceeds cap
+            expect(() => P.boundedGas(16_000_000n, 17_000_000n, { extraGas: 1_100_000n })).to.throw(/exceeds the per-transaction cap/);
         });
     });
 });
